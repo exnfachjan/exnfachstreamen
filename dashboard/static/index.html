@@ -95,6 +95,10 @@
   .state .word.warn { color: var(--amber); }
   .state .clock { font-size: 21px; font-weight: 650; color: var(--muted); }
 
+  /* A display rule on a class can silently beat the hidden attribute, and the
+     failure mode is a button that stays on screen doing the wrong thing. */
+  [hidden] { display: none !important; }
+
   .bigbtn {
     min-height: 52px; min-width: 168px; font-size: 16px; font-weight: 700;
     border-radius: 14px; padding: 0 26px;
@@ -240,7 +244,7 @@
       </div>
       <div class="actions" style="margin:0">
         <button class="bigbtn start" id="start">&#9654;&nbsp; Start stream</button>
-        <button class="bigbtn stop" id="stop">&#9632;&nbsp; Stop stream</button>
+        <button class="bigbtn stop" id="stop" hidden>&#9632;&nbsp; Stop stream</button>
       </div>
     </div>
     <div class="metrics">
@@ -574,9 +578,22 @@ async function refresh() {
     $('hero').className = 'card span2 ' +
       (state === 'on' ? 'live' : state === 'warn' ? 'warn' : 'off');
 
+    // Only ever show the action that exists. A Stop button on an idle stream
+    // offers something that cannot happen, and while live the one button you
+    // may need in a hurry should not sit next to one that ends the broadcast.
+    $('start').hidden = o.streaming;
+    $('stop').hidden = !o.streaming;
+    $('start').disabled = false;
+    $('stop').disabled = false;
+
     $('streamtime').textContent = o.streaming ? hms(o.duration_ms) : '';
     $('dropped').textContent =
       o.total_frames ? `${o.dropped_frames} / ${o.total_frames}` : '-';
+  } else {
+    // OBS unreachable: the last known state is now a guess, so keep the
+    // button visible for layout but refuse to pretend it would work.
+    $('start').disabled = true;
+    $('stop').disabled = true;
   }
 
   if (sc) {
