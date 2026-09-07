@@ -1,0 +1,6 @@
+fastapi==0.115.*
+uvicorn==0.34.*
+obsws-python==1.7.*
+requests==2.32.*
+python-multipart==0.0.20
+bcrypt==4.*

@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>exnfachstreamen - Dashboard</title>
+<style>
+  /* Control-room styling: this panel is read mid-stream, often on a phone,
+     often outdoors. Everything here follows from that - state is legible at
+     arm's length, the numbers that decide "is it working" sit together at the
+     top, and touch targets are thumb-sized rather than mouse-sized.
+
+     Surfaces carry the structure, not outlines. Boxing every group in a 1px
+     stroke gives equal visual weight to a stream's state and to a file-upload
+     row, and the grid of rectangles reads as busy long before you have parsed
+     any of it. Depth here comes from fill, spacing and type instead, so the
+     only things drawing a line around themselves are the ones that genuinely
+     need to interrupt you. */
+  :root {
+    --bg: #0b0d12; --surface: #151821; --surface2: #1c202b; --sunken: #10131a;
+    --line: rgba(255,255,255,.06);
+    --text: #eceef3; --muted: #8d95a6;
+    --green: #22d17c; --red: #f2503f; --amber: #f5c518;
+    /* Violet accent: the status colours carry the information that matters,
+       so the brand colour deliberately sits far from green, red and amber in
+       hue and never doubles as a state. */
+    --accent: #9b6cff; --accent-ink: #14101f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  /* Metrics change every second. Proportional digits jitter as they do, which
+     reads as instability in a panel whose whole job is showing stability. */
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+
+  nav {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; background: rgba(11,13,18,.82); backdrop-filter: blur(14px);
+    padding: 14px 18px;
+  }
+  nav .brand { font-weight: 750; font-size: 17px; letter-spacing: -.01em; }
+  nav .brand b { color: var(--accent); font-weight: 750; }
+  nav .links { display: flex; gap: 8px; }
+  nav .links a {
+    text-decoration: none; font-size: 13px; font-weight: 650;
+    padding: 9px 15px; border-radius: 10px;
+    color: var(--muted); background: transparent;
+  }
+  nav .links a:hover { background: var(--surface); color: var(--text); }
+  nav .links a.primary {
+    background: var(--accent); color: var(--accent-ink);
+  }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 14px 14px 48px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .span2 { grid-column: 1 / -1; }
+  @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--surface); border-radius: 18px; padding: 20px;
+  }
+  .card h2 {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--muted); margin: 0 0 16px; font-weight: 700;
+  }
+
+  /* ---- Hero: the one thing you look at while walking ---- */
+  #hero { border-radius: 20px; padding: 22px; background: var(--surface); }
+  /* The state indicator is a wash across the surface rather than a bar or a
+     frame: readable peripherally, and it cannot be mistaken for a container
+     edge the way a coloured border can. */
+  #hero.live { background:
+    radial-gradient(120% 160% at 0% 0%, rgba(34,209,124,.16), transparent 58%),
+    var(--surface); }
+  #hero.warn { background:
+    radial-gradient(120% 160% at 0% 0%, rgba(245,197,24,.17), transparent 58%),
+    var(--surface); }
+  #hero.off { background: var(--surface); }
+
+  .herotop {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+  }
+  .state { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .state .word {
+    font-size: 38px; font-weight: 800; letter-spacing: -.025em; line-height: 1.05;
+  }
+  .state .word.on   { color: var(--green); }
+  .state .word.off  { color: var(--muted); }
+  .state .word.warn { color: var(--amber); }
+  .state .clock { font-size: 21px; font-weight: 650; color: var(--muted); }
+
+  .bigbtn {
+    min-height: 52px; min-width: 168px; font-size: 16px; font-weight: 700;
+    border-radius: 14px; padding: 0 26px;
+  }
+  .start { background: var(--green); color: #06240f; }
+  .stop  { background: var(--red); color: #2a0703; }
+
+  /* Metric tiles, unboxed: the label/value pairing and the gaps already group
+     them, so four more rectangles would only add noise. A single hairline
+     between columns keeps them from running together. */
+  .metrics {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    margin-top: 22px; gap: 0;
+  }
+  @media (max-width: 620px) { .metrics { grid-template-columns: repeat(2, 1fr); row-gap: 18px; } }
+  .metric { padding: 0 16px; min-width: 0; box-shadow: inset 1px 0 0 var(--line); }
+  .metric:first-child { padding-left: 0; box-shadow: none; }
+  @media (max-width: 620px) {
+    .metric:nth-child(odd) { padding-left: 0; box-shadow: none; }
+  }
+  .metric .l {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); font-weight: 700;
+  }
+  .metric .v {
+    font-size: 22px; font-weight: 700; margin-top: 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .metric .v.dim { color: var(--muted); }
+
+  .badge { padding: 3px 10px; border-radius: 8px; font-size: 12px;
+           font-weight: 700; letter-spacing: 0; text-transform: none; }
+  .badge.on  { background: rgba(34,209,124,.15); color: var(--green); }
+  .badge.off { background: rgba(242,80,63,.15);  color: var(--red); }
+  .badge.brb { background: rgba(245,197,24,.15); color: var(--amber); }
+
+  button {
+    border: 0; border-radius: 11px; padding: 11px 16px; font-weight: 650;
+    font-size: 14px; cursor: pointer; color: var(--accent-ink);
+    background: var(--accent);
+  }
+  button:disabled { opacity: .4; cursor: default; }
+  .btn-sm { padding: 9px 14px; font-size: 13px; min-height: 38px; }
+  .btn-blue { background: var(--accent); color: var(--accent-ink); }
+  .btn-gray { background: var(--surface2); color: var(--text); }
+  .btn-gray:hover:not(:disabled) { background: #232836; }
+  .btn-warn { background: var(--amber); color: #2b2200; }
+  .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+
+  .row { display: flex; align-items: center; justify-content: space-between;
+         gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  .muted { color: var(--muted); font-size: 13px; }
+  /* Inputs read as inputs by being recessed into the surface rather than
+     ringed by a stroke - the same trick the rest of the layout uses. */
+  input[type=text], input[type=password] {
+    flex: 1; min-width: 0; background: var(--sunken); color: var(--text);
+    border: 0; border-radius: 11px; padding: 12px 14px; font-size: 15px;
+  }
+  input::placeholder { color: var(--muted); }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+
+  .kv { display: flex; justify-content: space-between; align-items: center;
+        gap: 10px; padding: 10px 0; box-shadow: inset 0 -1px 0 var(--line);
+        font-size: 13px; }
+  .kv:last-child { box-shadow: none; }
+  .kv .l { color: var(--muted); flex: none; }
+  .kv code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap;
+             background: var(--sunken); border-radius: 9px; padding: 9px 11px; }
+  .kv button { flex: none; }
+  /* Click-to-copy. The cursor and hover are the only affordance these get,
+     so make them unmistakable. */
+  code.copy { cursor: pointer; transition: background .12s, color .12s; }
+  code.copy:hover { background: #191d26; }
+  code.copy.copied { background: rgba(34,209,124,.15); color: var(--green); }
+
+  .channel {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface2); border-radius: 12px;
+    padding: 12px 14px; margin-bottom: 8px;
+  }
+
+  /* Scenes as a wrapping chip row rather than stacked full-width buttons:
+     with several live layouts the old list pushed everything else off screen. */
+  .scenes { display: flex; flex-wrap: wrap; gap: 8px; }
+  .scenebtn {
+    flex: 1 1 auto; min-height: 46px; padding: 11px 16px;
+    background: var(--surface2); color: var(--text); font-weight: 650;
+  }
+  .scenebtn:hover { background: #232836; }
+  .scenebtn.active, .scenebtn.active:hover {
+    background: var(--green); color: #06240f;
+  }
+  /* A live scene takes part in BRB failover; anything else is a manual scene
+     the watchdog deliberately keeps its hands off. Worth seeing at a glance
+     while live. */
+  .scenebtn.live::before {
+    content: '\25CF'; color: var(--green); margin-right: 8px; font-size: 10px;
+    vertical-align: middle;
+  }
+  .scenebtn.active.live::before { color: #06240f; }
+  .livescene {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; font-size: 13px; padding: 9px 0;
+    box-shadow: inset 0 -1px 0 var(--line);
+  }
+  .livescene:last-of-type { box-shadow: none; }
+  /* The one thing that still gets an outline. Paused failover is a foot-gun
+     with a delay: nothing looks wrong until the connection drops mid-stream
+     and viewers watch it happen. It is supposed to interrupt. */
+  #failoverwarn {
+    background: rgba(245,197,24,.10); border: 1px solid rgba(245,197,24,.45);
+    color: var(--amber); border-radius: 12px; padding: 12px 14px;
+    font-size: 13px; margin-top: 12px;
+  }
+
+  #chart { width: 100%; height: 150px; display: block; }
+
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+           background: var(--surface2); color: var(--text);
+           padding: 12px 20px; border-radius: 12px; display: none; z-index: 20;
+           box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+</style>
+</head>
+<body>
+<nav>
+  <span class="brand">exnfach<b>streamen</b></span>
+  <span class="links">
+    <a class="primary" href="/obs/vnc.html?path=obs/websockify&amp;autoconnect=true" target="_blank">Remote OBS</a>
+    <a href="#" id="logout">Sign out</a>
+  </span>
+</nav>
+
+<div class="wrap"><div class="grid">
+
+  <!-- Hero. Everything needed to answer "is my stream fine" without reading a
+       single label: the state word, how long it has been up, and the four
+       numbers that go wrong first. -->
+  <div class="card span2" id="hero">
+    <div class="herotop">
+      <div class="state">
+        <span class="word off" id="streambadge">OFFLINE</span>
+        <span class="clock num" id="streamtime"></span>
+      </div>
+      <div class="actions" style="margin:0">
+        <button class="bigbtn start" id="start">&#9654;&nbsp; Start stream</button>
+        <button class="bigbtn stop" id="stop">&#9632;&nbsp; Stop stream</button>
+      </div>
+    </div>
+    <div class="metrics">
+      <div class="metric">
+        <div class="l">Ingest</div>
+        <div class="v"><span class="badge off" id="ingestbadge">Offline</span></div>
+      </div>
+      <div class="metric">
+        <div class="l">Bitrate</div>
+        <div class="v num" id="ingestbitrate">-</div>
+      </div>
+      <div class="metric">
+        <div class="l">SRTLA links</div>
+        <div class="v num" id="ingestpeers">-</div>
+      </div>
+      <div class="metric">
+        <div class="l">RTT</div>
+        <div class="v num" id="ingestrtt">-</div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn-sm btn-gray" id="ingestmute">Mute</button>
+      <button class="btn-sm btn-warn" id="ingestfix">&#128295;&nbsp;Fix A/V</button>
+      <span class="muted" style="margin-left:auto;align-self:center">
+        Dropped frames <span class="num" id="dropped">-</span></span>
+    </div>
+  </div>
+
+  <div class="card span2">
+    <h2>Scene <span class="badge on" id="scenebadge">-</span></h2>
+    <div class="scenes" id="scenes"></div>
+
+    <div class="row" style="margin-top:16px">
+      <span>Auto&#8209;BRB
+        <span class="muted">- switch away when the ingest drops</span></span>
+      <button class="btn-sm btn-gray" id="failovertoggle">&hellip;</button>
+    </div>
+    <div id="failoverwarn" hidden>
+      &#9888; Automatic switching is <strong>paused</strong>. Scenes stay put so you can
+      build them - but if the connection drops while you're live, viewers will see
+      it. Turn this back on before streaming.
+    </div>
+
+    <h2 style="margin-top:20px">Live scenes
+      <span class="muted" style="text-transform:none">&#9679; take part in BRB failover</span></h2>
+    <div class="muted" style="margin-bottom:10px">
+      Add a scene here to use it as an on-air layout (second camera, picture-in-picture,
+      overlay). Each one gets the ingest wired in automatically; arrange the rest in OBS.
+      If the connection drops you go to BRB and come back to whichever live scene you
+      were on.
+    </div>
+    <div id="livescenes"></div>
+    <div class="row" style="margin-top:10px">
+      <input id="livescenename" type="text" placeholder="Scene name (e.g. PiP Cam)">
+      <button id="addlivescene" class="btn-blue">Add</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Ingest bitrate <span class="muted" style="text-transform:none">past 60 sec</span></h2>
+    <canvas id="chart"></canvas>
+  </div>
+
+  <div class="card span2">
+    <h2>Connect your encoder <span class="muted" style="text-transform:none">one key, all three protocols</span>
+      <button class="btn-sm btn-gray" id="showkey" style="margin-left:auto">Show key</button></h2>
+    <div class="kv"><span class="l">SRTLA</span><code id="url-srtla">-</code></div>
+    <div class="kv"><span class="l">SRT</span><code id="url-srt">-</code></div>
+    <div class="kv"><span class="l">RTMP</span><code id="url-rtmp">-</code></div>
+    <div class="muted" style="margin-top:8px">RTMP: server
+      <code id="url-rtmp-server">-</code>, stream key = the same key as
+      above - some apps (OBS included) want those in two separate fields
+      instead of one URL. Needs H.264 + AAC - for HEVC/H.265 use SRT or
+      SRTLA instead.</div>
+  </div>
+
+  <div class="card span2">
+    <h2>Twitch destinations <span class="muted" style="text-transform:none">restreamed from one OBS output, no re-encode</span></h2>
+    <div id="channels"></div>
+    <div class="row" style="margin-top:12px">
+      <input id="channelname" type="text" placeholder="Label (e.g. Main channel)">
+      <input id="channelkey" type="password" placeholder="Twitch stream key">
+      <button id="addchannel" class="btn-blue">Add</button>
+    </div>
+  </div>
+
+  <div class="card span2">
+    <h2>BRB screen</h2>
+    <div class="row">
+      <input id="brbfile" type="file" accept="video/*,image/*">
+      <button id="upload">Upload</button>
+    </div>
+    <div class="muted" id="brbstate"></div>
+  </div>
+
+</div></div>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+async function post(url, body, isForm) {
+  const opts = { method: 'POST' };
+  if (body) {
+    if (isForm) opts.body = body;
+    else { opts.body = JSON.stringify(body);
+           opts.headers = { 'Content-Type': 'application/json' }; }
+  }
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+  return r.json();
+}
+
+// ---- Bitrate chart (rolling 60s, canvas) ----
+const samples = [];   // {t, kbps}
+function drawChart() {
+  const c = $('chart'), ctx = c.getContext('2d');
+  const W = c.width = c.clientWidth * devicePixelRatio;
+  const H = c.height = 160 * devicePixelRatio;
+  ctx.clearRect(0, 0, W, H);
+  const now = Date.now(), span = 60000;
+  const pts = samples.filter(s => now - s.t < span);
+  const max = Math.max(1000, ...pts.map(p => p.kbps)) * 1.15;
+  ctx.strokeStyle = 'rgba(141,149,166,.15)'; ctx.lineWidth = 1;
+  ctx.font = `${11 * devicePixelRatio}px sans-serif`;
+  ctx.fillStyle = 'rgba(141,149,166,.7)';
+  for (let i = 1; i <= 3; i++) {
+    const y = H - (H - 18) * i / 3 - 4;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    ctx.fillText(`${Math.round(max * i / 3 / 100) / 10} Mbps`, 6, y - 4);
+  }
+  if (pts.length < 2) return;
+  ctx.beginPath();
+  pts.forEach((p, i) => {
+    const x = W - (now - p.t) / span * W;
+    const y = H - 4 - (H - 22) * (p.kbps / max);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.strokeStyle = '#9b6cff'; ctx.lineWidth = 2 * devicePixelRatio; ctx.stroke();
+  ctx.lineTo(W, H); ctx.lineTo(W - (now - pts[0].t) / span * W, H); ctx.closePath();
+  ctx.fillStyle = 'rgba(155,108,255,.16)'; ctx.fill();
+}
+
+// OBS reports stream duration in ms; show it the way a stopwatch would.
+function hms(ms) {
+  const t = Math.max(0, Math.floor((ms || 0) / 1000));
+  const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, sec = t % 60;
+  const pad = n => String(n).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+
+// ---- Click to copy ----
+// navigator.clipboard needs a secure context. Served over HTTPS that is fine,
+// but the same panel opened on a bare IP (the no-domain fallback described in
+// caddy/Caddyfile) is not, and there the API is simply absent. Fall back to
+// the old execCommand path rather than failing silently.
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch { return false; }
+}
+
+// Delegated, so it also covers elements re-rendered by the refresh loop.
+document.addEventListener('click', async ev => {
+  const el = ev.target.closest('code.copy');
+  if (!el) return;
+  const text = el.dataset.copy || el.textContent;
+  // The markup ships "-" as a placeholder until /api/connection-info lands;
+  // copying that to the clipboard would be a silent no-op with a success toast.
+  if (!text || text === '-') return;
+  if (await copyText(text)) {
+    el.classList.add('copied');
+    setTimeout(() => el.classList.remove('copied'), 900);
+    toast('Copied');
+  } else {
+    toast('Could not copy - select the text manually');
+  }
+});
+
+// ---- Failover switch ----
+// Mirrors the config, never guesses: the button reflects what the last
+// /api/status said, so a toggle made in another browser tab shows up here on
+// the next refresh instead of the two views disagreeing.
+let failoverOn = true;
+function renderFailover(enabled) {
+  failoverOn = enabled;
+  const btn = $('failovertoggle');
+  const warn = $('failoverwarn');
+  if (!btn) return;
+  btn.textContent = enabled ? 'On' : 'Paused';
+  btn.className = 'btn-sm ' + (enabled ? 'btn-gray' : 'btn-warn');
+  btn.title = enabled
+    ? 'Switching to BRB automatically when the ingest drops. Click to pause.'
+    : 'Automatic switching is off - scenes stay where you put them.';
+  if (warn) warn.hidden = enabled;
+}
+
+// ---- Live scenes ----
+// LIVE itself is listed but not removable: it's the scene the watchdog falls
+// back to when the one you were on disappears, so something has to hold that
+// position. The backend enforces this too - this only avoids offering a
+// button that would be rejected.
+function renderLiveScenes(live) {
+  const box = $('livescenes');
+  if (!box) return;
+  box.innerHTML = '';
+  live.forEach(name => {
+    const row = document.createElement('div');
+    row.className = 'livescene';
+    const label = document.createElement('span');
+    label.textContent = name;
+    row.appendChild(label);
+    if (name === 'LIVE') {
+      const note = document.createElement('span');
+      note.className = 'muted';
+      note.textContent = 'default';
+      row.appendChild(note);
+    } else {
+      const btn = document.createElement('button');
+      btn.className = 'btn-sm btn-gray';
+      btn.textContent = 'Remove';
+      btn.title = 'Stops counting as a live scene. The scene stays in OBS.';
+      btn.onclick = () => {
+        if (!confirm(`Stop using "${name}" as a live scene?\n\n`
+                   + `The scene and its layout stay in OBS - it just no longer `
+                   + `takes part in BRB failover.`)) return;
+        fetch(`/api/live-scenes/${encodeURIComponent(name)}`, { method: 'DELETE' })
+          .then(async r => { if (!r.ok) throw new Error((await r.json()).detail);
+                             toast(`${name} is no longer a live scene`); refresh(); })
+          .catch(e => toast(e.message));
+      };
+      row.appendChild(btn);
+    }
+    box.appendChild(row);
+  });
+}
+
+// ---- Twitch channel rows ----
+// Built node by node rather than with innerHTML: ch.name is operator-supplied
+// and persisted in config.json, so a template literal here would be stored XSS
+// that fires for everyone who opens the dashboard afterwards.
+function channelRow(ch) {
+  const div = document.createElement('div');
+  div.className = 'channel';
+  const label = document.createElement('span');
+  label.textContent = ch.name;
+  const del = document.createElement('button');
+  del.className = 'btn-sm btn-gray del';
+  del.textContent = 'Remove';
+  div.append(label, del);
+  div.querySelector('.del').onclick = () => {
+    if (!confirm(`Remove ${ch.name}?`)) return;
+    fetch(`/api/twitch-channels/${ch.id}`, { method: 'DELETE' })
+      .then(refresh).catch(e => toast(e.message));
+  };
+  return div;
+}
+
+// ---- Connection info (fetched once - it's static) ----
+(async () => {
+  try {
+    const info = await (await fetch('/api/connection-info')).json();
+    const masked = url => url.split(info.rtmp_key).join('•'.repeat(12));
+    let shown = false;
+
+    // What a click copies, kept separate from what is displayed: the whole
+    // point of the mask is to keep the key off a screen that may be shared,
+    // and you still want to paste the real URL into your phone. So copying
+    // always yields the unmasked value, whether or not it is revealed.
+    function put(id, real, display) {
+      const el = $(id);
+      el.textContent = display;
+      el.dataset.copy = real;
+      el.classList.add('copy');
+      el.title = 'Click to copy';
+    }
+
+    function render() {
+      put('url-srtla', info.srtla, shown ? info.srtla : masked(info.srtla));
+      put('url-srt', info.srt, shown ? info.srt : masked(info.srt));
+      put('url-rtmp', info.rtmp, shown ? info.rtmp : masked(info.rtmp));
+      put('url-rtmp-server', info.rtmp_server, info.rtmp_server);
+      $('showkey').textContent = shown ? 'Hide key' : 'Show key';
+    }
+    $('showkey').onclick = () => { shown = !shown; render(); };
+    render();
+  } catch (e) { toast('Could not load connection info'); }
+})();
+
+// ---- Main refresh loop ----
+async function refresh() {
+  let s;
+  try { s = await (await fetch('/api/status')).json(); }
+  catch { return; }
+  const o = s.obs, sc = s.scenes, ing = s.ingest;
+
+  renderFailover(s.failover_enabled !== false);
+
+  if (o) {
+    // Three states, not two. "Streaming" alone is the reassuring-but-wrong
+    // signal: OBS can be happily pushing bytes to Twitch while viewers stare
+    // at the BRB screen because the phone dropped. That case has to look
+    // different from a healthy stream at a glance, hence the amber warn state.
+    const degraded = o.streaming &&
+      ((sc && sc.current === 'BRB') || (ing && !ing.online));
+    const state = !o.streaming ? 'off' : (degraded ? 'warn' : 'on');
+
+    const b = $('streambadge');
+    b.textContent = !o.streaming ? 'OFFLINE' : (degraded ? 'ON AIR / BRB' : 'LIVE');
+    b.className = 'word ' + (state === 'on' ? 'on' : state === 'warn' ? 'warn' : 'off');
+    $('hero').className = 'card span2 ' +
+      (state === 'on' ? 'live' : state === 'warn' ? 'warn' : 'off');
+
+    $('streamtime').textContent = o.streaming ? hms(o.duration_ms) : '';
+    $('dropped').textContent =
+      o.total_frames ? `${o.dropped_frames} / ${o.total_frames}` : '-';
+  }
+
+  if (sc) {
+    const b = $('scenebadge');
+    b.textContent = sc.current;
+    b.className = 'badge ' + (sc.current === 'BRB' ? 'brb' : 'on');
+    const live = s.live_scenes || [];
+    const box = $('scenes'); box.innerHTML = '';
+    sc.all.forEach(name => {
+      const btn = document.createElement('button');
+      btn.className = 'scenebtn'
+        + (name === sc.current ? ' active' : '')
+        + (live.includes(name) ? ' live' : '');
+      btn.textContent = name;
+      btn.title = live.includes(name)
+        ? 'Live scene - the watchdog switches away on ingest loss and back here'
+        : 'Manual scene - failover stands down while this is on program';
+      btn.onclick = () => post('/api/scene', { name })
+        .then(refresh).catch(e => toast(e.message));
+      box.appendChild(btn);
+    });
+    renderLiveScenes(live);
+  }
+
+  if (ing) {
+    const b = $('ingestbadge');
+    b.textContent = ing.online ? 'Online' : 'Offline';
+    b.className = 'badge ' + (ing.online ? 'on' : 'off');
+    $('ingestbitrate').textContent = ing.online ? `${(ing.bitrate_kbps/1000).toFixed(1)} Mbps` : '-';
+    $('ingestpeers').textContent = ing.online ? (ing.peers || 1) : '-';
+    $('ingestrtt').textContent = ing.online && ing.rtt_ms != null ? `${Math.round(ing.rtt_ms)} ms` : '-';
+    const mb = $('ingestmute');
+    // null = OBS unreachable or the source isn't created yet - don't offer a
+    // toggle whose current state we can't show.
+    mb.disabled = ing.muted == null;
+    mb.textContent = ing.muted ? 'Unmute' : 'Mute';
+    const now = Date.now();
+    samples.push({ t: now, kbps: ing.online ? ing.bitrate_kbps : 0 });
+    while (samples.length && now - samples[0].t > 65000) samples.shift();
+    drawChart();
+  }
+
+  const box = $('channels'); box.innerHTML = '';
+  (s.twitch_channels || []).forEach(ch => box.appendChild(channelRow(ch)));
+
+  $('brbstate').textContent = s.brb_file ? `Current: ${s.brb_file}` : 'No BRB media yet';
+}
+
+// ---- Buttons ----
+$('start').onclick = () =>
+  post('/api/stream/start').then(() => toast('Stream started'))
+    .catch(e => toast(e.message));
+$('stop').onclick = () => {
+  if (confirm('Stop the stream?'))
+    post('/api/stream/stop').then(() => toast('Stream stopped'))
+      .catch(e => toast(e.message));
+};
+$('ingestfix').onclick = () =>
+  post('/api/ingest/fix').then(() => toast('Ingest source restarted'))
+    .catch(e => toast(e.message));
+$('ingestmute').onclick = () =>
+  post('/api/ingest/mute')
+    .then(r => { toast(r.muted ? 'Ingest muted' : 'Ingest unmuted'); refresh(); })
+    .catch(e => toast(e.message));
+$('failovertoggle').onclick = () => {
+  const next = !failoverOn;
+  if (!next && !confirm(
+        'Pause automatic BRB switching?\n\n'
+      + 'Scenes will stay where you put them, which is what you want while '
+      + 'building a layout or placing an alert overlay.\n\n'
+      + 'While paused there is no failsafe: if the ingest drops during a '
+      + 'live stream, viewers keep seeing the frozen feed.')) return;
+  post('/api/failover', { enabled: next })
+    .then(r => { renderFailover(r.failover_enabled);
+                 toast(r.failover_enabled
+                   ? 'Auto-BRB on' : 'Auto-BRB paused - remember to re-enable');
+                 refresh(); })
+    .catch(e => toast(e.message));
+};
+
+$('addlivescene').onclick = () => {
+  const name = $('livescenename').value.trim();
+  if (!name) return toast('Scene name required');
+  post('/api/live-scenes', { name })
+    .then(() => { $('livescenename').value = '';
+                  toast(`${name} added - arrange it in OBS`); refresh(); })
+    .catch(e => toast(e.message));
+};
+
+$('addchannel').onclick = () => {
+  const name = $('channelname').value.trim();
+  const key = $('channelkey').value.trim();
+  if (!name || !key) return toast('Label and key are both required');
+  post('/api/twitch-channels', { name, key })
+    .then(() => { $('channelname').value = ''; $('channelkey').value = '';
+                  toast('Channel added'); refresh(); })
+    .catch(e => toast(e.message));
+};
+$('upload').onclick = () => {
+  const f = $('brbfile').files[0];
+  if (!f) return toast('Pick a file first');
+  const fd = new FormData(); fd.append('file', f);
+  post('/api/brb', fd, true)
+    .then(r => { toast('BRB updated: ' + r.file); refresh(); })
+    .catch(e => toast(e.message));
+};
+$('logout').onclick = (e) => {
+  e.preventDefault();
+  post('/api/logout').finally(() => location.href = '/login');
+};
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

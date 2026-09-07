@@ -1,0 +1,45 @@
+# TLS in front of the dashboard and noVNC. Authentication is a session
+# cookie issued by the dashboard's own login page; Caddy asks the dashboard
+# to validate it (forward_auth) on every protected request, so the remote
+# OBS (noVNC) is covered by the same login.
+#
+# The site address comes from DOMAIN in .env, passed through by
+# docker-compose.yml. It is REQUIRED - Caddy refuses to start on an empty
+# site address, and that is the point: a forgotten or misspelled DOMAIN
+# fails loudly at boot instead of quietly serving the wrong hostname.
+#
+# Real cert via Let's Encrypt: DNS must point at this server's IP and ports
+# 80+443 must be reachable from the internet - Caddy runs the ACME HTTP-01
+# challenge over :80 automatically, no manual cert handling.
+#
+# For local/IP-only testing without a domain, replace the {$DOMAIN} line
+# below with ":443" AND add `tls internal` as the first line inside the
+# block. Both edits are needed: an address without a hostname gives Caddy
+# nothing to request a public certificate for.
+
+{$DOMAIN} {
+	# Public: the login page and the login endpoint themselves.
+	@public path /login /api/login
+	handle @public {
+		reverse_proxy dashboard:8000
+	}
+
+	# Remote OBS via noVNC:  /obs/vnc.html?path=obs/websockify&autoconnect=true
+	handle_path /obs/* {
+		forward_auth dashboard:8000 {
+			uri /auth/verify
+		}
+		reverse_proxy obs:6080
+	}
+
+	handle {
+		forward_auth dashboard:8000 {
+			uri /auth/verify
+		}
+		reverse_proxy dashboard:8000
+	}
+}
+
+:80 {
+	redir https://{host}{uri} permanent
+}

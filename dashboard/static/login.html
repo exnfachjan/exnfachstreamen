@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>exnfachstreamen - Sign in</title>
+<style>
+  :root {
+    --bg: #0b0d12; --surface: #151821; --sunken: #10131a;
+    --text: #eceef3; --muted: #8d95a6; --red: #f2503f;
+    --accent: #9b6cff; --accent-ink: #14101f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 16px;
+  }
+  /* No outline: the panel is already the only lit thing on the page, so a
+     stroke around it would be pure decoration. */
+  .card {
+    background: var(--surface); border-radius: 20px; padding: 32px;
+    width: 100%; max-width: 372px;
+  }
+  h1 { font-size: 24px; font-weight: 750; letter-spacing: -.015em; margin: 0 0 4px; }
+  h1 b { color: var(--accent); font-weight: 750; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+  /* Recessed rather than ringed, matching the dashboard. */
+  input {
+    width: 100%; background: var(--sunken); color: var(--text);
+    border: 0; border-radius: 11px; padding: 13px 14px; font-size: 15px;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+  button {
+    width: 100%; margin-top: 22px; background: var(--accent); color: var(--accent-ink);
+    border: 0; border-radius: 12px; padding: 13px; font-weight: 700;
+    font-size: 15px; cursor: pointer; min-height: 48px;
+  }
+  button:disabled { opacity: .6; }
+  #error { color: var(--red); font-size: 13px; margin-top: 12px;
+           min-height: 18px; text-align: center; }
+</style>
+</head>
+<body>
+<form class="card" id="form">
+  <h1>exnfach<b>streamen</b></h1>
+  <p class="sub">Remote OBS &amp; stream control</p>
+  <label for="user">Username</label>
+  <input id="user" autocomplete="username" required autofocus>
+  <label for="pass">Password</label>
+  <input id="pass" type="password" autocomplete="current-password" required>
+  <button id="btn">Sign in</button>
+  <div id="error"></div>
+</form>
+<script>
+const form = document.getElementById('form');
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('btn'), err = document.getElementById('error');
+  btn.disabled = true; err.textContent = '';
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: document.getElementById('user').value,
+        password: document.getElementById('pass').value,
+      }),
+    });
+    if (r.ok) { location.href = '/'; return; }
+    err.textContent = (await r.json()).detail || 'Sign-in failed';
+  } catch { err.textContent = 'Network error'; }
+  btn.disabled = false;
+});
+</script>
+</body>
+</html>

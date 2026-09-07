@@ -1,0 +1,8 @@
+{
+    "type": "rtmp_custom",
+    "settings": {
+        "server": "rtmp://live.twitch.tv/app",
+        "key": "",
+        "use_auth": false
+    }
+}

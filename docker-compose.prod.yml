@@ -1,0 +1,14 @@
+# Adds back what only makes sense on the real (bare-metal Linux) server -
+# apply on top of docker-compose.yml when deploying for real:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Docker Desktop's Linux VM has no /dev/uinput device node, so this is kept
+# out of the base compose file (which is what you want for local testing -
+# just `docker compose up -d`, no extra flags) and layered on here instead.
+# Only Sunshine/Moonlight's virtual mouse/keyboard injection needs it; noVNC
+# (browser remote desktop, input via the VNC protocol itself) works without it.
+services:
+  obs:
+    devices:
+      - /dev/uinput

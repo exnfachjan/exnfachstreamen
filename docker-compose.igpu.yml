@@ -1,0 +1,24 @@
+# Intel iGPU passthrough for OBS. Layer on top of the other two files on a
+# host that actually has a usable /dev/dri (check first - see
+# docs/setup-hetzner.md §4):
+#
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.prod.yml \
+#                  -f docker-compose.igpu.yml up -d
+#
+# Deliberately narrow: this hands OBS the render node so its *encoder* can be
+# VAAPI instead of software x264. OBS's own compositing stays on llvmpipe
+# (LIBGL_ALWAYS_SOFTWARE=1 in obs/Dockerfile) - moving that to the iGPU as
+# well means getting EGL working against KasmVNC's X server, which is a
+# separate and much less certain change for a job an i7-7700 does in software
+# without breaking a sweat at 720p/1080p.
+#
+# No group_add for the `render` group: the obs container runs as root, which
+# opens /dev/dri/renderD128 regardless of its group.
+#
+# The encoder itself is NOT selected here - it's an OBS profile setting, made
+# once in the OBS UI over noVNC and then persisted in the obs_config volume.
+services:
+  obs:
+    devices:
+      - /dev/dri:/dev/dri

@@ -1,0 +1,13 @@
+# Everything here runs inside Linux containers. Git for Windows' default
+# core.autocrlf=true converts LF -> CRLF on checkout, which silently breaks
+# any shebang script (`exec /entrypoint.sh: no such file or directory` -
+# the kernel looks for the interpreter "/bin/bash\r", which doesn't exist).
+# Force LF regardless of the checking-out platform's git config.
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.conf  text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+Dockerfile text eol=lf

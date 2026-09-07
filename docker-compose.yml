@@ -1,0 +1,119 @@
+services:
+  ingest:
+    build: ./ingest
+    restart: unless-stopped
+    environment:
+      PUBLISH_KEY: ${PUBLISH_KEY}
+      PLAY_KEY: ${PLAY_KEY}
+      SRTLA_LOG_LEVEL: ${SRTLA_LOG_LEVEL:-info}
+    volumes:
+      - sls_state:/var/lib/sls
+      - restream_targets:/etc/nginx/restream.d
+    ports:
+      - "5000:5000/udp"   # SRTLA publish (bonded)
+      - "4001:4001/udp"   # SRT publish (direct)
+      - "1935:1935/tcp"   # RTMP publish
+      # 4000/udp (SRT playback) and 8080/tcp (sls API/stats) are deliberately
+      # not published - only OBS and the dashboard use them, both over the
+      # compose network.
+
+  obs:
+    build: ./obs
+    restart: unless-stopped
+    shm_size: 1g
+    environment:
+      OBS_WS_PASSWORD: ${OBS_WS_PASSWORD}
+    volumes:
+      - obs_config:/config
+      - ./data/media:/media
+    # No /dev/uinput here on purpose - see docker-compose.prod.yml. Docker
+    # Desktop's Linux VM has no such device, so this compose file alone is
+    # what you want for local testing; the bare-metal server needs the extra
+    # file layered on for Sunshine/Moonlight's virtual mouse/keyboard input.
+    # Sunshine (Moonlight remote desktop) ports deliberately NOT published.
+    # Upstream publishes them, but ran on Oracle, where the VCN Security List
+    # never opened 47984-48000 - so they were unreachable from the internet
+    # regardless. Hetzner has no such upstream layer: publishing them here
+    # would put a remote desktop straight on the public IP. Use noVNC at
+    # https://<domain>/obs/... instead, which sits behind the dashboard login.
+    # To re-enable, uncomment and restrict via DOCKER-USER (see docs §3c).
+    # ports:
+    #   - "47984-47990:47984-47990/tcp"
+    #   - "48010:48010/tcp"
+    #   - "47998-48000:47998-48000/udp"
+    depends_on:
+      - ingest
+
+  watchdog:
+    build: ./watchdog
+    restart: unless-stopped
+    environment:
+      OBS_HOST: obs
+      OBS_PORT: "4455"
+      OBS_WS_PASSWORD: ${OBS_WS_PASSWORD}
+      INGEST_STATS_URL: http://ingest:8080
+      PLAY_KEY: ${PLAY_KEY}
+      DOWN_THRESHOLD_SEC: "1.5"
+      UP_THRESHOLD_SEC: "3.0"
+      MIN_LIVE_DWELL_SEC: "5.0"
+    volumes:
+      # Read-only view of the dashboard's config, for the live-scene list it
+      # owns. A file rather than an HTTP call on purpose: the failsafe must
+      # keep working while the dashboard is restarting or broken.
+      - ./data/config:/data:ro
+    depends_on:
+      - obs
+      - ingest
+
+  dashboard:
+    build: ./dashboard
+    restart: unless-stopped
+    environment:
+      OBS_HOST: obs
+      OBS_PORT: "4455"
+      OBS_WS_PASSWORD: ${OBS_WS_PASSWORD}
+      WATCHDOG_URL: http://watchdog:8081
+      INGEST_STATS_URL: http://ingest:8080
+      INGEST_RTMP_HOST: ingest
+      PUBLISH_KEY: ${PUBLISH_KEY}
+      PLAY_KEY: ${PLAY_KEY}
+      RESTREAM_KEY: ${RESTREAM_KEY}
+      PUBLIC_HOST: ${DOMAIN:-}
+      SRTLA_PORT: "5000"
+      SRT_PORT: "4001"
+      RTMP_PORT: "1935"
+      RESTREAM_TARGETS_FILE: /restream.d/targets.conf
+      DASH_USER: ${DASH_USER}
+      DASH_PASS_HASH: ${DASH_PASS_HASH}
+    volumes:
+      - ./data/media:/media
+      - ./data/config:/data
+      - restream_targets:/restream.d
+    depends_on:
+      - obs
+      - watchdog
+      - ingest
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    depends_on:
+      - dashboard
+      - obs
+
+volumes:
+  sls_state:
+  restream_targets:
+  obs_config:
+  caddy_data:
+  caddy_config:
