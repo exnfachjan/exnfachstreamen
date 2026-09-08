@@ -27,7 +27,7 @@ This is a merge of two prior projects:
 ## Install
 
 ```bash
-git clone https://github.com/exnfachjan/irlstreamplattform.git exnfachstreamen
+git clone https://github.com/exnfachjan/exnfachstreamen.git
 cd exnfachstreamen
 sudo ./install.sh
 ```
