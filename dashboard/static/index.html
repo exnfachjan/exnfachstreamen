@@ -62,9 +62,17 @@
 
   .card {
     background: var(--surface); border-radius: 18px; padding: 20px;
+    /* Grid items floor at min-content unless told otherwise, and the connect
+       card's min-content is a 70-character SRT URL set in nowrap. Without
+       this the single column stretches to fit that string, every other card
+       is dragged out to the same width, and the whole layout hangs off the
+       right edge of a phone - with the media queries below firing correctly
+       the entire time, which is what makes it look like they do nothing.
+       The URLs scroll inside their own code boxes instead (.kv code). */
+    min-width: 0;
   }
   .card h2 {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     font-size: 12px; text-transform: uppercase; letter-spacing: .09em;
     color: var(--muted); margin: 0 0 16px; font-weight: 700;
   }
@@ -157,6 +165,19 @@
     flex: 1; min-width: 0; background: var(--sunken); color: var(--text);
     border: 0; border-radius: 11px; padding: 12px 14px; font-size: 15px;
   }
+  /* The selectors above are type-specific and a file input is neither, so it
+     kept the UA widget - including a UA intrinsic width that ignores the
+     column it sits in. */
+  input[type=file] {
+    flex: 1; min-width: 0; max-width: 100%;
+    background: var(--sunken); color: var(--muted);
+    border: 0; border-radius: 11px; padding: 10px 12px; font-size: 13px;
+  }
+  input[type=file]::file-selector-button {
+    border: 0; border-radius: 8px; padding: 8px 12px; margin-right: 10px;
+    font: inherit; font-weight: 650; cursor: pointer;
+    background: var(--surface2); color: var(--text);
+  }
   input::placeholder { color: var(--muted); }
   input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
 
@@ -176,9 +197,14 @@
 
   .channel {
     display: flex; align-items: center; justify-content: space-between;
-    background: var(--surface2); border-radius: 12px;
+    gap: 10px; background: var(--surface2); border-radius: 12px;
     padding: 12px 14px; margin-bottom: 8px;
   }
+  /* Remove is the point of the row; a long channel label truncates instead of
+     shouldering the button out of the card. */
+  .channel span { min-width: 0; overflow: hidden;
+                  text-overflow: ellipsis; white-space: nowrap; }
+  .channel button { flex: none; }
 
   /* Scenes as a wrapping chip row rather than stacked full-width buttons:
      with several live layouts the old list pushed everything else off screen. */
@@ -215,6 +241,31 @@
   }
 
   #chart { width: 100%; height: 150px; display: block; }
+
+  /* ---- Phone ----
+     The rules above already describe the layout this has to hold in one hand,
+     so this block only does what they cannot express: it turns the two-up
+     rows into stacks and gives the controls you reach for while walking a
+     full-width thumb target. */
+  @media (max-width: 620px) {
+    .wrap { padding: 12px 12px 40px; }
+    .card { padding: 16px; }
+    #hero { padding: 18px; }
+    /* Subtitle under the heading instead of squeezed beside it. `order` keeps
+       a trailing control (Show key) up on the title's line, where it reads as
+       belonging to the heading rather than to the first row below it. */
+    .card h2 .muted { order: 1; flex-basis: 100%;
+                      font-weight: 500; letter-spacing: 0; }
+    /* Start/Stop is the one control you may need in a hurry and without
+       looking, so it gets the full width rather than 168px of it. */
+    .herotop .actions { width: 100%; }
+    .bigbtn { flex: 1 1 100%; }
+    /* Paired inputs stack. Side by side at this width they shrink until the
+       placeholder is cut mid-word and neither field can show what you typed
+       - and a Twitch key is exactly the thing you need to see in full. */
+    .row input[type=text], .row input[type=password] { flex-basis: 100%; }
+    #addlivescene, #addchannel, #upload, #brbfile { flex: 1 1 100%; }
+  }
 
   #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
            background: var(--surface2); color: var(--text);
@@ -367,14 +418,24 @@ async function post(url, body, isForm) {
 const samples = [];   // {t, kbps}
 function drawChart() {
   const c = $('chart'), ctx = c.getContext('2d');
-  const W = c.width = c.clientWidth * devicePixelRatio;
-  const H = c.height = 160 * devicePixelRatio;
+  // Draw in CSS pixels and let one transform absorb the device ratio. The
+  // offsets below (the 18px reserved for the top gridline, the 4px label
+  // inset) are layout distances, but scaling only the font and line widths -
+  // as this did - left them in device pixels, so on a 3x phone they came out
+  // a third of their intended size and the top label was clipped off the
+  // canvas. Height comes from the element now instead of a 160 that had
+  // drifted from the 150px in the stylesheet, which was squashing every
+  // frame vertically.
+  const dpr = devicePixelRatio;
+  const W = c.clientWidth, H = c.clientHeight;
+  c.width = W * dpr; c.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
   const now = Date.now(), span = 60000;
   const pts = samples.filter(s => now - s.t < span);
   const max = Math.max(1000, ...pts.map(p => p.kbps)) * 1.15;
   ctx.strokeStyle = 'rgba(141,149,166,.15)'; ctx.lineWidth = 1;
-  ctx.font = `${11 * devicePixelRatio}px sans-serif`;
+  ctx.font = '11px sans-serif';
   ctx.fillStyle = 'rgba(141,149,166,.7)';
   for (let i = 1; i <= 3; i++) {
     const y = H - (H - 18) * i / 3 - 4;
@@ -388,7 +449,7 @@ function drawChart() {
     const y = H - 4 - (H - 22) * (p.kbps / max);
     i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
   });
-  ctx.strokeStyle = '#9b6cff'; ctx.lineWidth = 2 * devicePixelRatio; ctx.stroke();
+  ctx.strokeStyle = '#9b6cff'; ctx.lineWidth = 2; ctx.stroke();
   ctx.lineTo(W, H); ctx.lineTo(W - (now - pts[0].t) / span * W, H); ctx.closePath();
   ctx.fillStyle = 'rgba(155,108,255,.16)'; ctx.fill();
 }
