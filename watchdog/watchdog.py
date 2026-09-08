@@ -62,6 +62,13 @@ MIN_LIVE_DWELL = float(os.environ.get("MIN_LIVE_DWELL_SEC", "5.0"))
 SCENE_LIVE_DEFAULT = "LIVE"
 SCENE_BRB = "BRB"
 
+# OBS names the single scene of a newly created collection "Scene". Nothing in
+# this stack references it, but the dashboard renders every OBS scene as a
+# button, so it sits in the scene row looking like a control. Renamed once on
+# bootstrap to something that says what it is.
+SCENE_OBS_DEFAULT = "Scene"
+SCENE_STARTSCREEN = "Startscreen"
+
 # Written by the dashboard, read-only here (see docker-compose.yml). Kept as
 # a plain shared file rather than an HTTP call so that a dashboard restart
 # can never take the failsafe down with it.
@@ -241,6 +248,20 @@ def ensure_scenes(cl, live_scenes=None):
     """Idempotently create the live/BRB scenes and their sources."""
     live_scenes = live_scenes or load_live_scenes()
     existing = {s["sceneName"] for s in cl.get_scene_list().scenes}
+
+    # Self-limiting: after the rename there is no "Scene" left to match. Both
+    # guards matter - a scene the operator registered as live under either
+    # name is theirs, and renaming it would strand the dashboard's config on a
+    # name that no longer exists.
+    if (SCENE_OBS_DEFAULT in existing
+            and SCENE_STARTSCREEN not in existing
+            and SCENE_OBS_DEFAULT not in live_scenes):
+        cl.set_scene_name(SCENE_OBS_DEFAULT, SCENE_STARTSCREEN)
+        existing.discard(SCENE_OBS_DEFAULT)
+        existing.add(SCENE_STARTSCREEN)
+        log.info("renamed OBS's default scene %s -> %s",
+                 SCENE_OBS_DEFAULT, SCENE_STARTSCREEN)
+
     for scene in (*live_scenes, SCENE_BRB):
         if scene not in existing:
             cl.create_scene(scene)
