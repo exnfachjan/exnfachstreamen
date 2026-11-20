@@ -78,7 +78,10 @@ services:
       PUBLISH_KEY: ${PUBLISH_KEY}
       PLAY_KEY: ${PLAY_KEY}
       RESTREAM_KEY: ${RESTREAM_KEY}
-      PUBLIC_HOST: ${DOMAIN:-}
+      # What the "Connect your encoder" card shows. The ingest hostname, NOT
+      # the panel's tunnel hostname - SRT/SRTLA are UDP and cannot ride the
+      # Cloudflare tunnel (see INGEST_HOST in .env.example).
+      PUBLIC_HOST: ${INGEST_HOST:-}
       SRTLA_PORT: "5000"
       SRT_PORT: "4001"
       RTMP_PORT: "1935"
@@ -94,22 +97,37 @@ services:
       - watchdog
       - ingest
 
+  # Internal auth gate only: plain HTTP, no published ports, no certificates.
+  # TLS ends at Cloudflare; cloudflared below is the only way in. Caddy stays
+  # because the dashboard login is enforced with its forward_auth, which
+  # covers noVNC (/obs/*) too - cloudflared cannot do that on its own.
   caddy:
     image: caddy:2
     restart: unless-stopped
-    environment:
-      DOMAIN: ${DOMAIN:-}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
     depends_on:
       - dashboard
       - obs
+
+  # Cloudflare Tunnel: an outbound-only connection to Cloudflare that carries
+  # the panel (dashboard + noVNC). Nothing for it is published on the host, so
+  # ports 80/443 stay closed. The tunnel's public hostname is configured in the
+  # Cloudflare Zero Trust dashboard with the service  http://caddy:80
+  # (docs/cloudflare-tunnel.md).
+  #
+  # HTTP only. The phone ingest (UDP 5000/4001, TCP 1935) cannot go through a
+  # tunnel and stays published on the ingest service above.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - caddy
 
 volumes:
   sls_state:

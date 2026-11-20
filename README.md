@@ -37,6 +37,15 @@ Docker, generates `.env`, checks DNS before Caddy ever contacts Let's Encrypt,
 and builds. It is safe to re-run: every step checks the current state first, so
 an interrupted run is resumed by running it again.
 
+```bash
+sudo ./update.sh       # git pull, migrate .env, rebuild, restart
+sudo ./uninstall.sh    # remove containers + images, keep data (--purge: everything)
+```
+
+The panel is served through a **Cloudflare Tunnel** (`cloudflared` container),
+not through open ports 80/443. You need a tunnel token and two hostnames -
+see [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md).
+
 | Profile | For |
 |---|---|
 | `hetzner` | Hetzner dedicated. Removes `nomodeset`, lifts the i915/drm blacklist, verifies the render node and VA-API. Detected automatically. |
@@ -72,7 +81,8 @@ Phone / encoder (SRTLA, SRT, or RTMP - one key works for all three)
       ▼
   watchdog   - polls sls's stats API, drives OBS scene failover
   dashboard  - connect-URLs, Twitch channel list, BRB upload, status
-  caddy      - TLS + auth in front of dashboard and noVNC
+  caddy      - internal login gate (forward_auth) for dashboard and noVNC
+  cloudflared- Cloudflare Tunnel: the only way into the panel, no open web ports
 ```
 
 One publish key (`PUBLISH_KEY`) works for SRTLA, SRT and RTMP alike - that
@@ -105,8 +115,8 @@ Desktop, which is why the base file leaves it out. On an Intel host with a
 working iGPU, add `-f docker-compose.igpu.yml` as well to hand OBS the render
 node for hardware encoding.
 4. Open `https://<your-domain>/`, log in, add your Twitch channel(s), upload a
-   BRB video/image. (`DOMAIN` in `.env` is what Caddy serves on and gets the
-   certificate for - see `docs/setup.md` if you don't have a domain yet.)
+   BRB video/image. (`DOMAIN` is the tunnel's public hostname - see
+   `docs/cloudflare-tunnel.md`.)
 5. Point your phone app at the URLs shown in the dashboard's "Connect your
    encoder" card (see `docs/phone-setup.md`).
 6. Hit **Start** in the dashboard.
@@ -123,12 +133,13 @@ Full server setup, pick the one matching your hardware:
 | Path | Purpose |
 |---|---|
 | `install.sh`, `install/` | Installer and its host profiles (`hetzner`, `generic`) |
+| `update.sh`, `uninstall.sh` | Update in place / remove the stack |
 | `docker-compose.yml` | All services |
 | `ingest/` | `sls` + `srtla_rec` + nginx-rtmp, single stream key, Twitch fan-out |
 | `obs/` | OBS Studio built from source (amd64 and arm64) + headless entrypoint. CEF for browser sources on amd64 |
 | `watchdog/` | BRB failover daemon. Polls `ingest`'s sls stats, drives scene switching across several live scenes |
 | `dashboard/` | FastAPI control panel: stream and scene control, live scenes, Auto-BRB switch, connection info, Twitch destinations, BRB media |
-| `caddy/` | Reverse proxy / TLS / auth (unchanged) |
+| `caddy/` | Internal auth gate behind the tunnel (plain HTTP, no ports) |
 | `docs/` | Server (Hetzner/amd64 and Oracle/arm64) + phone setup guides |
 
 ## What didn't make it in yet

@@ -61,3 +61,82 @@ have() { command -v "$1" >/dev/null 2>&1; }
 public_ipv4() {
     ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1
 }
+
+# ---------------------------------------------------------------- .env ---
+env_get() { grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2-; }
+
+# Set KEY=VALUE in .env, replacing an existing line or appending a new one.
+# VALUE goes through awk -v, not sed, so a token full of / + = cannot break it.
+env_set() {
+    local key="$1" val="$2" tmp
+    tmp="$(mktemp)"
+    if grep -qE "^$key=" .env; then
+        awk -v k="$key" -v v="$val" 'index($0, k"=")==1 {print k"="v; next} {print}' .env > "$tmp"
+    else
+        cat .env > "$tmp"; printf '%s=%s\n' "$key" "$val" >> "$tmp"
+    fi
+    cat "$tmp" > .env; rm -f "$tmp"   # cat, not mv: keeps .env's mode 600
+}
+
+# Fill in the Cloudflare-tunnel keys on an .env written before they existed
+# (or with the template's placeholder still in it). Shared by install.sh and
+# update.sh, so an existing server migrates on its next update.
+ensure_tunnel_env() {
+    local cur
+    cur="$(env_get TUNNEL_TOKEN)"
+    if [ -z "$cur" ] || [ "$cur" = change-me ]; then
+        info "Cloudflare Tunnel token: Zero Trust -> Networks -> Tunnels ->"
+        info "Create a tunnel (Cloudflared) -> copy the string after --token"
+        cur="$(ask 'Tunnel token')"
+        [ -n "$cur" ] || die "TUNNEL_TOKEN is required - cloudflared is the only way to reach the panel"
+        env_set TUNNEL_TOKEN "$cur"
+        ok "TUNNEL_TOKEN saved"
+    else
+        skip "TUNNEL_TOKEN already set"
+    fi
+
+    cur="$(env_get INGEST_HOST)"
+    if [ -z "$cur" ] || [ "$cur" = ingest.example.com ]; then
+        info "Phones need a separate DNS-only (grey cloud) hostname for SRT/SRTLA -"
+        info "UDP does not go through the tunnel."
+        cur="$(ask 'Ingest hostname (A record -> this server, grey cloud)' "ingest.$(env_get DOMAIN)")"
+        env_set INGEST_HOST "$cur"
+        ok "INGEST_HOST=$cur"
+    else
+        skip "INGEST_HOST=$cur"
+    fi
+}
+
+# ----------------------------------------------------------- resolution ---
+# Canvas size lives in two tracked files that install.sh edits in place. Those
+# edits are local modifications as far as git is concerned, so update.sh reads
+# them out first, resets the files, pulls, and writes them back with this.
+current_resolution() {
+    sed -n 's/^BaseCY=\([0-9]*\).*/\1/p' obs/config/profile-basic.ini | head -1
+}
+
+apply_resolution() {
+    # 1080 is the quality preset: 60 fps at 7000 kbps. Above Twitch's
+    # published 6000 recommendation, but accepted by its ingest; check the
+    # stream health in Twitch Inspector after changing it.
+    local cw ch fps vb
+    case "$1" in
+        720)  cw=1280; ch=720;  fps=30; vb=4500 ;;
+        1080) cw=1920; ch=1080; fps=60; vb=7000 ;;
+        *) die "resolution must be 720 or 1080" ;;
+    esac
+    sed -i -E "s/^BaseCX=.*/BaseCX=$cw/;   s/^BaseCY=.*/BaseCY=$ch/;
+               s/^OutputCX=.*/OutputCX=$cw/; s/^OutputCY=.*/OutputCY=$ch/;
+               s/^FPSCommon=.*/FPSCommon=$fps/;
+               s/^VBitrate=.*/VBitrate=$vb/" obs/config/profile-basic.ini
+    sed -i -E "s/^CANVAS_W, CANVAS_H = .*/CANVAS_W, CANVAS_H = $cw, $ch/" watchdog/watchdog.py
+    ok "${cw}x${ch}@${fps} @ ${vb} kbps, written to the OBS seed and the watchdog"
+}
+
+# nginx resolves the dashboard hostname for its on_publish callback once, at
+# config load, and caches the container IP. If the dashboard was recreated
+# after ingest, RTMP publishes get rejected with nothing in any log to show it.
+restart_ingest_after_up() {
+    sleep 5
+    docker compose restart ingest >/dev/null
+}

@@ -11,6 +11,8 @@
 #   sudo ./install.sh --yes              # accept every default, no prompts
 #   sudo ./install.sh --skip-build       # configure but do not build or start
 #
+# Later: sudo ./update.sh to update, sudo ./uninstall.sh to remove.
+#
 # Host-specific work lives in install/profile-*.sh. Everything else here is
 # the same on any machine.
 
@@ -26,7 +28,7 @@ while [ $# -gt 0 ]; do
         --profile=*) PROFILE="${1#*=}"; shift ;;
         --yes|-y) ASSUME_YES=1; shift ;;
         --skip-build) SKIP_BUILD=1; shift ;;
-        -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
 done
@@ -96,8 +98,8 @@ step "Configuration (.env)"
 if [ -f .env ]; then
     skip ".env exists - keeping it (delete it to start over)"
 else
-    DOMAIN="$(ask 'Domain that phones and viewers will use (e.g. stream.example.com)')"
-    [ -n "$DOMAIN" ] || die "DOMAIN is required; Caddy refuses to start without one"
+    DOMAIN="$(ask 'Panel hostname, served through the Cloudflare tunnel (e.g. stream.example.com)')"
+    [ -n "$DOMAIN" ] || die "a panel hostname is required"
 
     DASH_PASS="$(ask 'Dashboard password (blank = generate one)')"
     if [ -z "$DASH_PASS" ]; then
@@ -129,26 +131,17 @@ else
     printf '    %sDashboard login: admin / %s%s\n' "$BLD" "$DASH_PASS" "$RST"
     printf '    %sWrite that down now - it is not stored anywhere else.%s\n' "$YLW" "$RST"
 fi
-DOMAIN="$(grep -E '^DOMAIN=' .env | cut -d= -f2-)"
+ensure_tunnel_env
+DOMAIN="$(env_get DOMAIN)"
+INGEST_HOST="$(env_get INGEST_HOST)"
 
 # ------------------------------------------------------------ resolution ---
 # Canvas size lives in two files and they have to agree. If they drift, the
 # encoder either downscales every frame for nothing or the watchdog stretches
 # sources past the edges of the canvas.
 step "Canvas resolution"
-CUR_W=$(sed -n 's/^BaseCX=\([0-9]*\).*/\1/p' obs/config/profile-basic.ini | head -1)
-info "current seed: ${CUR_W:-?}px wide"
-RES="$(ask 'Resolution - 720 or 1080' "${RES_DEFAULT:-720}")"
-case "$RES" in
-    720)  CW=1280; CH=720;  VB=4500 ;;
-    1080) CW=1920; CH=1080; VB=6000 ;;
-    *) die "resolution must be 720 or 1080" ;;
-esac
-sed -i -E "s/^BaseCX=.*/BaseCX=$CW/;   s/^BaseCY=.*/BaseCY=$CH/;
-           s/^OutputCX=.*/OutputCX=$CW/; s/^OutputCY=.*/OutputCY=$CH/;
-           s/^VBitrate=.*/VBitrate=$VB/" obs/config/profile-basic.ini
-sed -i -E "s/^CANVAS_W, CANVAS_H = .*/CANVAS_W, CANVAS_H = $CW, $CH/" watchdog/watchdog.py
-ok "${CW}x${CH} @ ${VB} kbps, written to the OBS seed and the watchdog"
+info "current seed: $(current_resolution)p"
+apply_resolution "$(ask 'Resolution - 720 (30 fps, 4500k) or 1080 (60 fps, 7000k)' "${RES_DEFAULT:-1080}")"
 info "(the seed only applies to a fresh obs_config volume; an existing"
 info " install keeps whatever its OBS profile already has)"
 
@@ -169,21 +162,21 @@ fi
 ok "COMPOSE_FILE=$COMPOSE_FILES"
 
 # ------------------------------------------------------------------- dns ---
-step "DNS"
+# Only the ingest hostname is checked: the panel hostname is a CNAME that the
+# tunnel creates itself and that resolves to Cloudflare, never to this box.
+step "DNS (ingest)"
 MYIP="$(public_ipv4)"
 info "this server: ${MYIP:-unknown}"
-if have dig; then RESOLVED="$(dig +short A "$DOMAIN" @1.1.1.1 2>/dev/null | tail -1)"
-else RESOLVED="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1; exit}')"; fi
-info "$DOMAIN resolves to: ${RESOLVED:-nothing}"
+if have dig; then RESOLVED="$(dig +short A "$INGEST_HOST" @1.1.1.1 2>/dev/null | tail -1)"
+else RESOLVED="$(getent ahostsv4 "$INGEST_HOST" 2>/dev/null | awk '{print $1; exit}')"; fi
+info "$INGEST_HOST resolves to: ${RESOLVED:-nothing}"
 
 if [ -z "$RESOLVED" ]; then
-    warn "no A record. Caddy cannot get a certificate without one."
-    confirm "Continue anyway?" n || die "set the A record, then re-run"
+    warn "no A record yet - phones will not find the ingest until there is one."
 elif [ "$RESOLVED" != "$MYIP" ]; then
     warn "the A record does not point at this server."
-    warn "If the domain is on Cloudflare, set it to DNS-only (grey cloud):"
-    warn "the orange-cloud proxy carries no UDP, which kills SRT and SRTLA."
-    confirm "Continue anyway?" n || die "fix DNS first - failed ACME attempts burn Let's Encrypt rate limits"
+    warn "On Cloudflare it must be DNS-only (grey cloud): the orange-cloud"
+    warn "proxy carries no UDP, which kills SRT and SRTLA."
 else
     ok "A record points here"
 fi
@@ -201,15 +194,12 @@ info "Expect roughly 10-25 minutes on a first run, less on a rebuild."
 docker compose build
 
 step "Start"
-docker compose up -d
-# nginx resolves the dashboard hostname for its on_publish callback once, at
-# config load, and caches the container IP. If the dashboard was recreated
-# after ingest, RTMP publishes get rejected with nothing in any log to show it.
-sleep 5
-docker compose restart ingest >/dev/null
+docker compose up -d --remove-orphans
+restart_ingest_after_up
 
 step "Done"
 docker compose ps --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
 printf '\n    Dashboard: %shttps://%s/%s\n' "$BLD" "$DOMAIN" "$RST"
-info "The first load can take a few seconds while Caddy gets its certificate."
-info "Watch it with: docker compose logs -f caddy"
+printf '    Ingest:    %s%s%s (UDP 5000/4001, TCP 1935)\n' "$BLD" "$INGEST_HOST" "$RST"
+info "Panel unreachable? The tunnel needs a Public Hostname in Zero Trust:"
+info "  $DOMAIN -> HTTP -> caddy:80     Check: docker compose logs cloudflared"

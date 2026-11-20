@@ -171,8 +171,10 @@ Docker leaves alone.
 | 5000 | UDP | SRTLA bonded ingest |
 | 4001 | UDP | direct SRT ingest |
 | 1935 | TCP | RTMP ingest - protected by `on_publish` auth, not by the firewall |
-| 80 | TCP | ACME HTTP-01 challenge + redirect |
-| 443 | TCP/UDP | dashboard + noVNC |
+
+The panel (dashboard + noVNC) is **not** on this list: it is reached through
+the Cloudflare Tunnel, an outbound connection, so 80/443 stay closed
+([cloudflare-tunnel.md](cloudflare-tunnel.md)).
 
 ### 3c. Sunshine is the one you should close
 
@@ -391,13 +393,10 @@ sudo usermod -aG docker $USER
 exec su -l $USER          # pick up the new group without a full logout
 ```
 
-Point your domain's **A record** at the server IP first - Caddy needs to answer
-the ACME challenge on port 80 at first start, and `DOMAIN` is now required (an
-empty value stops Caddy from starting at all).
-
-If the domain is on Cloudflare: **grey cloud / DNS-only**. It's the same
-hostname your phone publishes SRT/SRTLA to, and Cloudflare's proxy doesn't
-carry UDP.
+Set up the Cloudflare Tunnel and the two hostnames first
+([cloudflare-tunnel.md](cloudflare-tunnel.md)): `DOMAIN` for the panel via the
+tunnel, `INGEST_HOST` as a **grey cloud / DNS-only** A record for the phone -
+Cloudflare's proxy and the tunnel don't carry UDP.
 
 ```bash
 git clone <your repo url> exnfachstreamen && cd exnfachstreamen
@@ -460,9 +459,9 @@ After that plain `docker compose up -d` picks up all three by itself.
 
 ## 6. First-run checklist
 
-1. `https://<your-domain>/` → log in. A real Let's Encrypt certificate, no
-   browser warning - if you get one, Caddy didn't complete ACME; check
-   `docker compose logs caddy` and that port 80 is actually reachable.
+1. `https://<your-domain>/` → log in. Cloudflare error 1033/502 instead: check
+   `docker compose logs cloudflared` and the tunnel's Public Hostname
+   (`http://caddy:80`).
 2. Add a Twitch channel (Creator Dashboard → Settings → Stream → primary key).
 3. Upload a BRB video or image.
 4. Point your phone at the URLs in the "Connect your encoder" card
@@ -574,7 +573,8 @@ sources past the edges of the canvas:
 - `watchdog/watchdog.py` → `CANVAS_W, CANVAS_H`
 
 `install.sh` asks for the resolution and writes both, which is the reliable way
-to do it. By hand, change both and raise `VBitrate` to ~6000 for 1080p. `profile-basic.ini` is only
+to do it. By hand, change both and set `FPSCommon=60` and `VBitrate=7000` for 1080p60
+(what `install.sh` writes for 1080). `profile-basic.ini` is only
 seeded on first run, so an existing install needs the change made in the OBS
 UI instead. Resetting the seed means dropping just that one volume, which
 also wipes your scenes:

@@ -48,8 +48,18 @@ OBS_PORT = int(os.environ.get("OBS_PORT", "4455"))
 OBS_PASSWORD = os.environ["OBS_WS_PASSWORD"]
 INGEST_STATS_URL = os.environ.get("INGEST_STATS_URL", "http://ingest:8080")
 PLAY_KEY = os.environ["PLAY_KEY"]
+# SRT receive latency OBS uses when reading from sls, in MICROseconds (ffmpeg's
+# libsrt unit). This hop is container-to-container on one host: no loss, no
+# jitter, nothing for a big buffer to absorb. It used to be 2000000 (2 s),
+# which added two full seconds of glass-to-glass delay for nothing. The
+# phone->server hop keeps its own, separately negotiated latency (set in the
+# phone app) - that one is where the network actually needs a buffer.
+# 200 ms matches sls's latency_min (ingest/conf/sls.conf); SRT uses the larger
+# of the two peers' values anyway, so going lower here changes nothing.
+INGEST_READ_LATENCY_MS = int(os.environ.get("INGEST_READ_LATENCY_MS", "200"))
 SRT_READ_URL = os.environ.get(
-    "SRT_READ_URL", f"srt://ingest:4000?streamid={PLAY_KEY}&latency=2000000"
+    "SRT_READ_URL",
+    f"srt://ingest:4000?streamid={PLAY_KEY}&latency={INGEST_READ_LATENCY_MS * 1000}",
 )
 TICK_SEC = float(os.environ.get("TICK_SEC", "0.5"))
 DOWN_THRESHOLD = float(os.environ.get("DOWN_THRESHOLD_SEC", "1.5"))
@@ -288,6 +298,15 @@ def ensure_scenes(cl, live_scenes=None):
         )
         stretch_to_canvas(cl, SCENE_LIVE_DEFAULT, SOURCE_INGEST)
         log.info("created ingest media source -> %s", SRT_READ_URL)
+    else:
+        # An existing obs_config volume keeps whatever URL the source was
+        # created with, so a changed SRT_READ_URL (e.g. the latency cut above)
+        # would otherwise only ever reach fresh installs. Compared first: this
+        # runs on every reconnect, and re-setting the input restarts it.
+        current = cl.get_input_settings(SOURCE_INGEST).input_settings
+        if current.get("input") != SRT_READ_URL:
+            cl.set_input_settings(SOURCE_INGEST, {"input": SRT_READ_URL}, True)
+            log.info("updated ingest media source -> %s", SRT_READ_URL)
 
     if SOURCE_BRB_MEDIA not in input_names():
         cl.create_input(
