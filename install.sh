@@ -6,12 +6,16 @@
 # current state first and skips what is already done, so the normal way to
 # recover from an interruption is to run it again.
 #
-#   sudo ./install.sh                    # detect the host, ask what it needs
-#   sudo ./install.sh --profile hetzner  # force a profile
-#   sudo ./install.sh --yes              # accept every default, no prompts
-#   sudo ./install.sh --skip-build       # configure but do not build or start
+# Run it as root. It creates a system user for the stack (default
+# "exnfachstreamen") that owns the checkout, .env and data/.
 #
-# Later: sudo ./update.sh to update, sudo ./uninstall.sh to remove.
+#   ./install.sh                    # detect the host, ask what it needs
+#   ./install.sh --profile hetzner  # force a profile
+#   ./install.sh --user NAME        # name of the app user
+#   ./install.sh --yes              # accept every default, no prompts
+#   ./install.sh --skip-build       # configure but do not build or start
+#
+# Later: ./update.sh to update, ./uninstall.sh to remove.
 #
 # Host-specific work lives in install/profile-*.sh. Everything else here is
 # the same on any machine.
@@ -20,15 +24,17 @@ set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 . install/lib.sh
 
-PROFILE=""; ASSUME_YES=0; SKIP_BUILD=0; REBOOT_REQUIRED=0
+PROFILE=""; ASSUME_YES=0; SKIP_BUILD=0; REBOOT_REQUIRED=0; APP_USER=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --profile) PROFILE="${2-}"; shift 2 ;;
         --profile=*) PROFILE="${1#*=}"; shift ;;
+        --user) APP_USER="${2-}"; shift 2 ;;
+        --user=*) APP_USER="${1#*=}"; shift ;;
         --yes|-y) ASSUME_YES=1; shift ;;
         --skip-build) SKIP_BUILD=1; shift ;;
-        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
 done
@@ -94,6 +100,13 @@ fi
 systemctl enable --now docker >/dev/null 2>&1 || true
 
 # ------------------------------------------------------------------- env ---
+# --------------------------------------------------------------- app user ---
+step "App user"
+# A re-run keeps the user from the first run unless --user says otherwise.
+[ -n "$APP_USER" ] || APP_USER="$(env_get APP_USER)"
+[ -n "$APP_USER" ] || APP_USER="$APP_USER_DEFAULT"
+ensure_app_user "$APP_USER"
+
 step "Configuration (.env)"
 if [ -f .env ]; then
     skip ".env exists - keeping it (delete it to start over)"
@@ -131,6 +144,7 @@ else
     printf '    %sDashboard login: admin / %s%s\n' "$BLD" "$DASH_PASS" "$RST"
     printf '    %sWrite that down now - it is not stored anywhere else.%s\n' "$YLW" "$RST"
 fi
+env_set APP_USER "$APP_USER"
 ensure_tunnel_env
 DOMAIN="$(env_get DOMAIN)"
 INGEST_HOST="$(env_get INGEST_HOST)"
@@ -182,6 +196,8 @@ else
 fi
 
 # ----------------------------------------------------------------- build ---
+chown_app "$APP_USER"
+
 if [ "$SKIP_BUILD" = 1 ]; then
     step "Done (build skipped)"
     info "Run: docker compose build && docker compose up -d"
@@ -196,6 +212,8 @@ docker compose build
 step "Start"
 docker compose up -d --remove-orphans
 restart_ingest_after_up
+
+chown_app "$APP_USER"
 
 step "Done"
 docker compose ps --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'

@@ -11,7 +11,13 @@
 #  2) assemble the slim Alpine runtime (nginx-rtmp + ffmpeg + supervisor).
 # ============================================================================
 
-FROM alexanderwagnerdev/srtla-server:latest AS sls
+# Pinned by digest, never :latest. Upstream 0.2.3 (Nov 2026) dropped srtla_rec
+# from the image entirely and bumped libsrt, which broke this build with
+# "libsrt.so.1.5.4: not found". 0.2.0 is the release this stack was built and
+# verified against. To move to a newer tag, first check it still ships
+# /usr/local/bin/srtla_rec:
+#   docker run --rm --entrypoint ls alexanderwagnerdev/srtla-server:<tag> /usr/local/bin
+FROM alexanderwagnerdev/srtla-server:0.2.0@sha256:7e9160f76980e0e23be7d4574d673267fddec8a1eea76e31871eb1ff20a51ba3 AS sls
 
 FROM alpine:3.20
 

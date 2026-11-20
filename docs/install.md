@@ -52,44 +52,32 @@ apt update && apt full-upgrade -y
 apt install -y git
 ```
 
-Put your SSH key on the server, then create your own user. From **your
-computer** (not the server):
+Put your SSH key on the server. From **your computer** (not the server):
 
 ```bash
 ssh-copy-id root@<server-ip>
 ```
 
-Back on the server, replace `streamer` with the name you want:
+Check that the key works - this must log you in **without** a password prompt:
 
 ```bash
-adduser --disabled-password --gecos "" streamer
-usermod -aG sudo streamer
-passwd streamer                       # needed for sudo
-mkdir -p /home/streamer/.ssh
-cp /root/.ssh/authorized_keys /home/streamer/.ssh/
-chown -R streamer:streamer /home/streamer/.ssh && chmod 700 /home/streamer/.ssh
+ssh root@<server-ip>
 ```
 
-**Test the new login in a second terminal before going on:**
-
-```bash
-ssh streamer@<server-ip>
-sudo whoami                           # must print: root
-```
-
-Only if that worked, shut off root and password logins (still on the root
-session):
+Only if that worked, switch off password logins (on the server):
 
 ```bash
 cat > /etc/ssh/sshd_config.d/10-hardening.conf <<'EOF'
-PermitRootLogin no
+PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 EOF
 sshd -t && systemctl restart ssh
 ```
 
-From here on, always log in as `streamer`.
+Root can still log in, but only with your key - bots trying passwords get
+nowhere. You do not create a user yourself: the installer creates a system
+account for the stack in step 5.
 
 ## 3. Cloudflare: tunnel and DNS (5 min)
 
@@ -111,12 +99,11 @@ SRT/SRTLA use UDP and Cloudflare's proxy does not carry it.
 
 ## 4. Download the repository (1 min)
 
-As `streamer`:
+As root, into `/opt`:
 
 ```bash
-cd ~
-git clone https://github.com/exnfachjan/exnfachstreamen.git
-cd exnfachstreamen
+git clone https://github.com/exnfachjan/exnfachstreamen.git /opt/exnfachstreamen
+cd /opt/exnfachstreamen
 ```
 
 **If the repository is private**, `git clone` asks for a password and GitHub
@@ -132,16 +119,20 @@ Paste that line at GitHub → repository → **Settings → Deploy keys → Add*
 
 ```bash
 GIT_SSH_COMMAND="ssh -i ~/.ssh/github_deploy" \
-    git clone git@github.com:exnfachjan/exnfachstreamen.git
-cd exnfachstreamen
+    git clone git@github.com:exnfachjan/exnfachstreamen.git /opt/exnfachstreamen
+cd /opt/exnfachstreamen
 git config core.sshCommand "ssh -i ~/.ssh/github_deploy"   # so update.sh can pull
 ```
 
 ## 5. Run the installer (30-40 min, mostly waiting)
 
 ```bash
-sudo ./install.sh
+./install.sh
 ```
+
+The installer creates the system user `exnfachstreamen`: no password, no
+login shell, owner of `/opt/exnfachstreamen`, `.env` and `data/`. Another name:
+`./install.sh --user <name>`.
 
 It asks, in this order:
 
@@ -154,8 +145,8 @@ After the reboot, log in again and run the **same command** - it continues
 where it stopped:
 
 ```bash
-ssh streamer@<server-ip>
-cd ~/exnfachstreamen && sudo ./install.sh
+ssh root@<server-ip>
+cd /opt/exnfachstreamen && ./install.sh
 ```
 
 | Question | Answer |
@@ -172,7 +163,7 @@ service says `running`, plus your dashboard URL.
 Check the tunnel is connected:
 
 ```bash
-sudo docker compose logs cloudflared | grep -c "Registered tunnel connection"   # expect 4
+docker compose logs cloudflared | grep -c "Registered tunnel connection"   # expect 4
 ```
 
 ## 6. First stream (10 min)
@@ -192,16 +183,16 @@ Done when Twitch shows you live and the dashboard scene is `LIVE`.
 
 ## Later
 
-| Task | Command (in `~/exnfachstreamen`) |
+| Task | Command (as root, in `/opt/exnfachstreamen`) |
 |---|---|
-| Update to the latest version | `sudo ./update.sh` |
-| Remove the stack, keep settings | `sudo ./uninstall.sh` |
-| Remove everything | `sudo ./uninstall.sh --purge` |
-| Status | `sudo docker compose ps` |
-| Logs of one service | `sudo docker compose logs -f <service>` (`watchdog`, `ingest`, `cloudflared`, ...) |
+| Update to the latest version | `./update.sh` |
+| Remove the stack, keep settings | `./uninstall.sh` |
+| Remove everything, incl. the app user | `./uninstall.sh --purge` |
+| Status | `docker compose ps` |
+| Logs of one service | `docker compose logs -f <service>` (`watchdog`, `ingest`, `cloudflared`, ...) |
 
-`.env` belongs to root (mode 600), which is why every `docker compose`
-command here needs `sudo`.
+`.env` belongs to the app user (mode 600). Run these as root; the scripts
+hand every file back to the app user when they are done.
 
 Updates restart containers, so a running stream drops for a few seconds. Run
 them between streams.
@@ -211,8 +202,8 @@ them between streams.
 | Symptom | Fix |
 |---|---|
 | `git clone` asks for a password | Private repository - use the deploy key in step 4 |
-| Browser shows Cloudflare error 1033 | Tunnel not connected: `sudo docker compose logs cloudflared`, check the token in `.env` |
+| Browser shows Cloudflare error 1033 | Tunnel not connected: `docker compose logs cloudflared`, check the token in `.env` |
 | Cloudflare error 502 | Public Hostname must be **HTTP** + `caddy:80` |
 | Phone cannot connect | Ingest record must be grey cloud and point at the server IP |
-| Dashboard live, Twitch not | `sudo docker compose logs ingest`, check the Twitch key in the dashboard |
-| Installer stops with an error | Fix what it says, run `sudo ./install.sh` again - finished steps are skipped |
+| Dashboard live, Twitch not | `docker compose logs ingest`, check the Twitch key in the dashboard |
+| Installer stops with an error | Fix what it says, run `./install.sh` again - finished steps are skipped |

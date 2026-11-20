@@ -140,3 +140,42 @@ restart_ingest_after_up() {
     sleep 5
     docker compose restart ingest >/dev/null
 }
+
+# --------------------------------------------------------------- app user ---
+# The stack gets its own system account: it owns the checkout, .env and
+# data/, has no password and no login shell, and is in the docker group so
+# `sudo -u <user> docker compose ...` works without root. Created by
+# install.sh, remembered in .env as APP_USER for update.sh and uninstall.sh.
+#
+# The containers themselves are still started by the Docker daemon, as
+# before - this account separates the files, not the container processes.
+APP_USER_COMMENT="exnfachstreamen app user"
+APP_USER_DEFAULT=exnfachstreamen
+
+ensure_app_user() {
+    local u="$1" home="/var/lib/$1"
+    if id "$u" >/dev/null 2>&1; then
+        skip "user $u exists"
+    else
+        useradd --system --user-group --create-home --home-dir "$home" \
+                --shell /usr/sbin/nologin --comment "$APP_USER_COMMENT" "$u"
+        ok "created system user $u (no password, no login shell)"
+    fi
+    getent group docker >/dev/null && usermod -aG docker "$u"
+}
+
+# Everything in the checkout back to the app user. Re-run after anything that
+# writes as root: git pulls, the installer's edits, and the containers, which
+# create files under data/ as root.
+chown_app() {
+    local u="${1:-}"
+    [ -n "$u" ] && id "$u" >/dev/null 2>&1 || return 0
+    chown -R "$u:$u" .
+    [ -f .env ] && chmod 600 .env
+    return 0
+}
+
+# git run as root on a checkout owned by the app user: git refuses that
+# ("dubious ownership") unless the directory is marked safe for this call.
+# Root, not the app user, so a deploy key in /root/.ssh keeps working.
+g() { git -c safe.directory="$PWD" "$@"; }

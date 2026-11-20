@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # exnfachstreamen uninstaller.
 #
-#   sudo ./uninstall.sh           # remove containers + images, KEEP your data
-#   sudo ./uninstall.sh --purge   # also delete volumes, data/ and .env
-#   sudo ./uninstall.sh --yes     # no prompts (with --purge: no DELETE prompt)
+#   ./uninstall.sh           # remove containers + images, KEEP your data
+#   ./uninstall.sh --purge   # also delete volumes, data/, .env and the app user
+#   ./uninstall.sh --yes     # no prompts (with --purge: no DELETE prompt)
 #
 # Default keeps .env, data/ (BRB media, dashboard config) and the Docker
 # volumes (OBS scenes and profile, sls stream keys, Twitch targets), so
@@ -29,6 +29,7 @@ done
 
 need_root
 [ -f docker-compose.yml ] || die "run this from the repository root"
+APP_USER="$(env_get APP_USER)"   # read now: --purge deletes .env below
 
 step "What will happen"
 info "stop and remove every container of this stack"
@@ -36,6 +37,7 @@ info "remove the images built for it (obs, ingest, dashboard, watchdog)"
 if [ "$PURGE" = 1 ]; then
     warn "DELETE the Docker volumes: OBS scenes/profile, sls keys, Twitch targets"
     warn "DELETE data/ (BRB media, dashboard config) and .env (all secrets)"
+    [ -n "$APP_USER" ] && warn "DELETE the system user $APP_USER (the checkout goes to root)"
     warn "This cannot be undone."
 else
     info "keep .env, data/ and the volumes (re-run ./install.sh to restore)"
@@ -74,6 +76,15 @@ if [ "$PURGE" = 1 ]; then
     ok "data/ deleted"
     rm -f .env
     ok ".env deleted"
+    # Only an account install.sh created - recognisable by its comment - so a
+    # --user pointing at a real person's account can never get it deleted.
+    if [ -n "$APP_USER" ] && [ "$(getent passwd "$APP_USER" | cut -d: -f5)" = "$APP_USER_COMMENT" ]; then
+        chown -R root:root .
+        userdel -r "$APP_USER" 2>/dev/null || userdel "$APP_USER"
+        ok "system user $APP_USER removed"
+    elif [ -n "$APP_USER" ]; then
+        skip "user $APP_USER was not created by install.sh - left alone"
+    fi
 fi
 
 # ------------------------------------------------------------------- host ---

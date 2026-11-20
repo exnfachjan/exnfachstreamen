@@ -6,9 +6,9 @@
 # changed. Your .env, data/ and every Docker volume (OBS scenes, sls keys,
 # Twitch targets) are kept.
 #
-#   sudo ./update.sh              # update and restart
-#   sudo ./update.sh --no-pull    # skip git pull (rebuild the current checkout)
-#   sudo ./update.sh --yes        # no prompts
+#   ./update.sh              # update and restart (as root)
+#   ./update.sh --no-pull    # skip git pull (rebuild the current checkout)
+#   ./update.sh --yes        # no prompts
 #
 # A running stream WILL drop for the few seconds the changed containers need
 # to restart. Run it between streams.
@@ -32,13 +32,11 @@ need_root
 [ -f .env ] || die "no .env - this is not installed yet; run ./install.sh"
 have docker || die "docker not found"
 
-# ------------------------------------------------------------------- code ---
-# git as the checkout's owner, not root: git refuses to work in a repository
-# owned by someone else ("dubious ownership"), and files it writes as root
-# would leave the checkout half root-owned.
-REPO_OWNER="$(stat -c %U .)"
-g() { if [ "$REPO_OWNER" = root ]; then git "$@"; else sudo -u "$REPO_OWNER" git "$@"; fi; }
+APP_USER="$(env_get APP_USER)"
 
+# ------------------------------------------------------------------- code ---
+# git runs as root (g() in install/lib.sh) and the checkout is handed back to
+# the app user afterwards - see chown_app below.
 step "Code"
 BEFORE="$(g rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [ "$PULL" = 1 ]; then
@@ -70,6 +68,8 @@ fi
 step "Configuration (.env)"
 ensure_tunnel_env
 
+chown_app "$APP_USER"
+
 # ----------------------------------------------------------------- images ---
 step "Images"
 docker compose pull --ignore-buildable 2>/dev/null || docker compose pull caddy cloudflared
@@ -84,6 +84,8 @@ confirm "Restart the changed containers now? (a live stream drops for a few seco
 # (nothing to do on most updates).
 docker compose up -d --remove-orphans
 restart_ingest_after_up
+
+chown_app "$APP_USER"
 
 step "Cleanup"
 # Only dangling layers left behind by the rebuild - never volumes, never

@@ -30,19 +30,21 @@ Step by step from a fresh Hetzner server, including OS, SSH and Cloudflare:
 **[docs/install.md](docs/install.md)**. The short version:
 
 ```bash
-git clone https://github.com/exnfachjan/exnfachstreamen.git
-cd exnfachstreamen
-sudo ./install.sh
+# as root
+git clone https://github.com/exnfachjan/exnfachstreamen.git /opt/exnfachstreamen
+cd /opt/exnfachstreamen
+./install.sh
 ```
 
 The installer detects the host, fixes what that host gets wrong, installs
-Docker, generates `.env`, checks DNS before Caddy ever contacts Let's Encrypt,
+Docker, creates a system user for the stack (`exnfachstreamen`, no login,
+owns the checkout and `.env`), generates `.env`, checks the ingest DNS record,
 and builds. It is safe to re-run: every step checks the current state first, so
 an interrupted run is resumed by running it again.
 
 ```bash
-sudo ./update.sh       # git pull, migrate .env, rebuild, restart
-sudo ./uninstall.sh    # remove containers + images, keep data (--purge: everything)
+./update.sh       # git pull, migrate .env, rebuild, restart
+./uninstall.sh    # remove containers + images, keep data (--purge: everything)
 ```
 
 The panel is served through a **Cloudflare Tunnel** (`cloudflared` container),
