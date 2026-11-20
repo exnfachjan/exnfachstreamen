@@ -145,7 +145,7 @@ Full server setup, pick the one matching your hardware:
 | `watchdog/` | BRB failover daemon. Polls `ingest`'s sls stats, drives scene switching across several live scenes |
 | `dashboard/` | FastAPI control panel: stream and scene control, live scenes, Auto-BRB switch, connection info, Twitch destinations, BRB media |
 | `caddy/` | Internal auth gate behind the tunnel (plain HTTP, no ports) |
-| `docs/` | Server (Hetzner/amd64 and Oracle/arm64) + phone setup guides |
+| `docs/` | Install guide, Cloudflare tunnel, BRB playlist, server (Hetzner/amd64, Oracle/arm64) and phone setup |
 
 ## What didn't make it in yet
 

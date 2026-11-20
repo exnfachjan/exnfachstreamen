@@ -33,11 +33,14 @@ follow-up; the single Main Ingest covers the primary use case.
 import json
 import os
 import re
+import itertools
 import secrets
 import shlex
+import subprocess
 import threading
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import bcrypt
 import requests
@@ -92,6 +95,23 @@ SCENE_BRB = "BRB"
 SOURCE_BRB_MEDIA = "BRB Media"
 SOURCE_BRB_IMAGE = "BRB Image"
 
+# Optional BRB playlist: a YouTube playlist and/or a queue of the channel's
+# recent Twitch clips, played by a browser source on top of the BRB media.
+# The page itself is static/brb-player.html, served from here; OBS loads it
+# over the compose network, so it never goes through Caddy's login.
+SOURCE_BRB_PLAYER = "BRB Player"
+PLAYER_URL = "http://dashboard:8000/brb/player"
+PLAYER_MODES = ("off", "youtube", "clips", "both")
+CLIP_RANGES = ("24hr", "7d", "30d", "all")
+CLIPS_DIR = MEDIA_DIR / "clips"
+CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+CLIPS_INDEX = CLIPS_DIR / "index.json"
+# Clips are 5-60 s each; this caps the download at a few hundred MB.
+MAX_CLIPS = int(os.environ.get("BRB_MAX_CLIPS", "20"))
+CLIPS_REFRESH_SEC = int(os.environ.get("BRB_CLIPS_REFRESH_SEC", "1800"))
+YT_LIST_RE = re.compile(r"^[A-Za-z0-9_-]{10,64}$")
+TWITCH_LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{3,25}$")
+
 # Live scenes: several layouts (wide shot, PiP, chat overlay, ...) that all
 # count as "on air". This module owns the list; the watchdog reads it
 # read-only from the same config file and treats every entry as live, so a
@@ -136,6 +156,15 @@ def load_config():
         cfg = json.loads(CONFIG_FILE.read_text())
     cfg.setdefault("twitch_channels", [])  # [{id, name, key}]
     cfg.setdefault("brb_file", None)
+    player = cfg.get("brb_player") if isinstance(cfg.get("brb_player"), dict) else {}
+    cfg["brb_player"] = {
+        "mode": player.get("mode") if player.get("mode") in PLAYER_MODES else "off",
+        "youtube_list": player.get("youtube_list") or "",
+        "clips_channel": player.get("clips_channel") or "",
+        "clips_range": player.get("clips_range") if player.get("clips_range") in CLIP_RANGES else "7d",
+        "shuffle": bool(player.get("shuffle", True)),
+        "volume": max(0, min(100, int(player.get("volume", 60)))),
+    }
     # The default live scene is not stored as removable data - it is the
     # floor the watchdog falls back to, so it is always present and always
     # first, whatever the file says.
@@ -428,6 +457,7 @@ def status():
         {"id": c["id"], "name": c["name"]} for c in cfg["twitch_channels"]
     ]
     out["brb_file"] = cfg.get("brb_file")
+    out["brb_player"] = cfg["brb_player"]
     out["live_scenes"] = cfg["live_scenes"]
     out["failover_enabled"] = cfg["failover_enabled"]
     return out
@@ -727,6 +757,269 @@ async def upload_brb(file: UploadFile):
         cfg["brb_file"] = dest.name
         save_config(cfg)
     return {"ok": True, "file": dest.name}
+
+
+# ---------- BRB player (optional YouTube playlist / Twitch clip queue) ----------
+
+_clips_lock = threading.Lock()
+_clips_status = {"count": 0, "updated": None, "error": None, "busy": False, "progress": None}
+
+
+def read_clip_index():
+    try:
+        return json.loads(CLIPS_INDEX.read_text())
+    except (OSError, ValueError):
+        return []
+
+
+def transcode_clip(src, dest):
+    """Twitch serves clips as HEVC only (every quality, since 2026), and the
+    Chromium inside OBS's browser source has no software HEVC decoder - the
+    clip plays as a black frame. So each clip is converted once to H.264.
+    720p keeps it cheap: niced, one at a time, a 60 s clip takes seconds."""
+    tmp = dest.with_suffix(".part.mp4")
+    subprocess.run(
+        ["nice", "-n", "15", "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+         "-i", str(src), "-vf", "scale=-2:'min(720,ih)'",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+         "-movflags", "+faststart", str(tmp)],
+        check=True, timeout=600,
+    )
+    tmp.replace(dest)
+
+
+def refresh_clips():
+    """Fetch the channel's top clips in the configured range.
+
+    yt-dlp lists them through Twitch's public site API, so no Twitch app or
+    token is needed. Only clips not already on disk are downloaded and
+    converted; anything no longer in the list is deleted, so the folder never
+    holds more than MAX_CLIPS.
+    """
+    p = load_config()["brb_player"]
+    if p["mode"] not in ("clips", "both") or not p["clips_channel"]:
+        return
+    if not _clips_lock.acquire(blocking=False):
+        return  # a refresh is already running
+    _clips_status.update(busy=True, error=None, progress="listing clips")
+    try:
+        from yt_dlp import YoutubeDL  # heavy import, only when used
+        url = (f"https://www.twitch.tv/{p['clips_channel']}/clips"
+               f"?filter=clips&range={p['clips_range']}")
+        quiet = {"quiet": True, "no_warnings": True, "noprogress": True}
+        with YoutubeDL(quiet) as ydl:
+            listing = ydl.extract_info(url, download=False, process=False) or {}
+            refs = list(itertools.islice(listing.get("entries") or [], MAX_CLIPS))
+
+        clips = []
+        dl_opts = {**quiet, "format": "720/best[height<=720]/best",
+                   "outtmpl": str(CLIPS_DIR / "%(id)s.src.%(ext)s")}
+        with YoutubeDL(dl_opts) as ydl:
+            for n, ref in enumerate(refs, 1):
+                _clips_status["progress"] = f"clip {n}/{len(refs)}"
+                try:
+                    info = ydl.extract_info(ref["url"], download=False)
+                    final = CLIPS_DIR / f"{info['id']}.mp4"
+                    if not final.exists():
+                        info = ydl.extract_info(ref["url"], download=True)
+                        src = Path(ydl.prepare_filename(info))
+                        try:
+                            transcode_clip(src, final)
+                        finally:
+                            src.unlink(missing_ok=True)
+                    clips.append({
+                        "file": final.name,
+                        "title": info.get("title") or "",
+                        "duration": info.get("duration") or 0,
+                        "timestamp": info.get("timestamp") or 0,
+                    })
+                except Exception:
+                    continue  # one broken clip must not cost the rest
+
+        clips.sort(key=lambda c: c["timestamp"], reverse=True)  # newest first
+        keep = {c["file"] for c in clips} | {CLIPS_INDEX.name}
+        for f in CLIPS_DIR.iterdir():
+            if f.name not in keep:
+                f.unlink(missing_ok=True)
+        CLIPS_INDEX.write_text(json.dumps(clips))
+        _clips_status.update(count=len(clips), updated=time.strftime("%H:%M"))
+        if not clips:
+            _clips_status["error"] = f"no clips for {p['clips_channel']} in range {p['clips_range']}"
+    except Exception as e:
+        _clips_status["error"] = str(e)[:200]
+    finally:
+        _clips_status.update(busy=False, progress=None)
+        _clips_lock.release()
+
+
+def clips_loop():
+    _clips_status["count"] = len(read_clip_index())
+    while True:
+        refresh_clips()
+        time.sleep(CLIPS_REFRESH_SEC)
+
+
+threading.Thread(target=clips_loop, daemon=True).start()
+
+
+def apply_brb_player(cl, player):
+    """Create/update the browser source and show it only when a mode is on.
+
+    The BRB media underneath stays visible as the fallback (the page is
+    transparent while it has nothing to play) but is muted whenever the
+    player is on, so the two never talk over each other.
+    """
+    if SCENE_BRB not in {s["sceneName"] for s in cl.get_scene_list().scenes}:
+        raise RuntimeError("BRB scene not created yet")
+    on = player["mode"] != "off"
+    v = cl.get_video_settings()
+    settings = {
+        "url": PLAYER_URL, "width": v.base_width, "height": v.base_height,
+        "reroute_audio": True,      # audio into OBS's mixer -> into the stream
+        "shutdown": True,           # stops (and goes silent) outside BRB
+        "restart_when_active": True,  # fresh page, fresh clip list, each BRB
+        "css": "body { background-color: rgba(0,0,0,0); margin: 0; overflow: hidden; }",
+    }
+    names = {i["inputName"] for i in cl.get_input_list().inputs}
+    if SOURCE_BRB_PLAYER not in names:
+        # browser_source exists only where OBS was built with CEF (amd64).
+        cl.create_input(SCENE_BRB, SOURCE_BRB_PLAYER, "browser_source", settings, on)
+    else:
+        cl.set_input_settings(SOURCE_BRB_PLAYER, settings, True)
+        item = cl.get_scene_item_id(SCENE_BRB, SOURCE_BRB_PLAYER).scene_item_id
+        cl.set_scene_item_enabled(SCENE_BRB, item, on)
+        if on:
+            cl.press_input_properties_button(SOURCE_BRB_PLAYER, "refreshnocache")
+    try:
+        cl.set_input_mute(SOURCE_BRB_MEDIA, on)
+    except Exception:
+        pass  # BRB media not bootstrapped yet - nothing to mute
+
+
+def apply_brb_player_on_boot():
+    """The source only needs creating once per OBS config volume, but OBS (and
+    the watchdog's BRB scene) may come up after this process, so retry for a
+    while. Created even with the player off - hidden - so turning it on later
+    is just a visibility toggle."""
+    for _ in range(200):
+        player = load_config()["brb_player"]
+        try:
+            with_obs(lambda cl: apply_brb_player(cl, player))
+            return
+        except Exception:
+            time.sleep(6)
+
+
+threading.Thread(target=apply_brb_player_on_boot, daemon=True).start()
+
+
+class BrbPlayerReq(BaseModel):
+    mode: str
+    youtube_list: str = ""
+    clips_channel: str = ""
+    clips_range: str = "7d"
+    shuffle: bool = True
+    volume: int = 60
+
+
+def parse_playlist(value):
+    """Accept a playlist URL (any youtube.com link with list=) or a bare ID."""
+    value = value.strip()
+    if not value:
+        return ""
+    if "://" in value or "youtube" in value or "youtu.be" in value:
+        lst = parse_qs(urlparse(value if "://" in value else "https://" + value).query).get("list", [""])[0]
+    else:
+        lst = value
+    if not YT_LIST_RE.match(lst):
+        raise HTTPException(status_code=400, detail="not a YouTube playlist link (needs list=...)")
+    return lst
+
+
+@app.get("/api/brb-player")
+def get_brb_player():
+    return {**load_config()["brb_player"], "clips": dict(_clips_status),
+            "last_event": _player_events[-1] if _player_events else None}
+
+
+@app.post("/api/brb-player")
+def set_brb_player(body: BrbPlayerReq):
+    if body.mode not in PLAYER_MODES:
+        raise HTTPException(status_code=400, detail="unknown mode")
+    if body.clips_range not in CLIP_RANGES:
+        raise HTTPException(status_code=400, detail="unknown clip range")
+    youtube_list = parse_playlist(body.youtube_list)
+    channel = body.clips_channel.strip().lstrip("@").lower()
+    if channel.startswith("http") or "twitch.tv/" in channel:
+        channel = channel.split("twitch.tv/")[-1].split("/")[0].split("?")[0]
+    if channel and not TWITCH_LOGIN_RE.match(channel):
+        raise HTTPException(status_code=400, detail="not a Twitch channel name")
+    if body.mode in ("youtube", "both") and not youtube_list:
+        raise HTTPException(status_code=400, detail="YouTube playlist link required")
+    if body.mode in ("clips", "both") and not channel:
+        raise HTTPException(status_code=400, detail="Twitch channel required")
+
+    with _cfg_lock:
+        cfg = load_config()
+        old = cfg["brb_player"]
+        cfg["brb_player"] = {
+            "mode": body.mode, "youtube_list": youtube_list,
+            "clips_channel": channel, "clips_range": body.clips_range,
+            "shuffle": body.shuffle, "volume": max(0, min(100, body.volume)),
+        }
+        save_config(cfg)
+        player = cfg["brb_player"]
+
+    if (player["clips_channel"], player["clips_range"]) != (old["clips_channel"], old["clips_range"]) \
+            or not read_clip_index():
+        threading.Thread(target=refresh_clips, daemon=True).start()
+    with_obs(lambda cl: apply_brb_player(cl, player))
+    return {**player, "clips": dict(_clips_status)}
+
+
+@app.post("/api/brb-player/refresh-clips")
+def refresh_clips_now():
+    threading.Thread(target=refresh_clips, daemon=True).start()
+    return {"ok": True}
+
+
+# The page and its data. Reached by OBS directly (dashboard:8000); from the
+# outside only through Caddy, i.e. behind the login like everything else.
+@app.get("/brb/player")
+def brb_player_page():
+    return FileResponse("static/brb-player.html")
+
+
+@app.get("/brb/player/state")
+def brb_player_state():
+    p = load_config()["brb_player"]
+    clips = read_clip_index() if p["mode"] in ("clips", "both") else []
+    return {
+        "mode": p["mode"],
+        "youtube_list": p["youtube_list"] if p["mode"] in ("youtube", "both") else "",
+        "shuffle": p["shuffle"], "volume": p["volume"],
+        "clips": [{"src": f"/brb/clips/{c['file']}", "title": c["title"],
+                   "duration": c["duration"]} for c in clips],
+    }
+
+
+_player_events: list[str] = []
+
+
+@app.post("/brb/player/log")
+async def brb_player_log(request: Request):
+    """The page inside OBS has no console anyone can see; it reports what it
+    plays and what fails here. Last 20 kept, shown in the dashboard."""
+    msg = (await request.body()).decode("utf-8", "replace")[:300]
+    line = f"{time.strftime('%H:%M:%S')} {msg}"
+    print(f"[brb-player] {msg}", flush=True)
+    _player_events.append(line)
+    del _player_events[:-20]
+    return {"ok": True}
+
+
+app.mount("/brb/clips", StaticFiles(directory=str(CLIPS_DIR)), name="clips")
 
 
 @app.get("/")

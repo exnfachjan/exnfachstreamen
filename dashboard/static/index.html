@@ -178,6 +178,12 @@
     font: inherit; font-weight: 650; cursor: pointer;
     background: var(--surface2); color: var(--text);
   }
+  select {
+    background: var(--sunken); color: var(--text); border: 0;
+    border-radius: 11px; padding: 12px 14px; font-size: 15px; flex: 1 1 auto;
+  }
+  input[type=range] { accent-color: var(--accent); }
+  input[type=checkbox] { accent-color: var(--accent); vertical-align: middle; }
   input::placeholder { color: var(--muted); }
   input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
 
@@ -264,7 +270,7 @@
        placeholder is cut mid-word and neither field can show what you typed
        - and a Twitch key is exactly the thing you need to see in full. */
     .row input[type=text], .row input[type=password] { flex-basis: 100%; }
-    #addlivescene, #addchannel, #upload, #brbfile { flex: 1 1 100%; }
+    #addlivescene, #addchannel, #upload, #brbfile, #psave, #pclipsnow, #prange { flex: 1 1 100%; }
   }
 
   #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
@@ -389,6 +395,36 @@
       <button id="upload">Upload</button>
     </div>
     <div class="muted" id="brbstate"></div>
+
+    <h2 style="margin-top:20px">Playlist <span class="muted" style="text-transform:none">optional - plays over the BRB media while you're away</span></h2>
+    <div class="row">
+      <select id="pmode">
+        <option value="off">Off - just the BRB media</option>
+        <option value="youtube">YouTube playlist</option>
+        <option value="clips">My Twitch clips</option>
+        <option value="both">Clips, then a YouTube video, repeat</option>
+      </select>
+    </div>
+    <div class="row" id="prow-yt">
+      <input id="pyt" type="text" placeholder="YouTube playlist link (with list=...)">
+    </div>
+    <div class="row" id="prow-clips">
+      <input id="pchannel" type="text" placeholder="Twitch channel name">
+      <select id="prange">
+        <option value="24hr">last 24 h</option>
+        <option value="7d">last 7 days</option>
+        <option value="30d">last 30 days</option>
+        <option value="all">all time</option>
+      </select>
+      <button id="pclipsnow" class="btn-gray btn-sm">Reload clips</button>
+    </div>
+    <div class="row">
+      <label class="muted"><input id="pshuffle" type="checkbox"> Shuffle</label>
+      <label class="muted" style="flex:1;display:flex;gap:10px;align-items:center">Volume
+        <input id="pvolume" type="range" min="0" max="100" style="flex:1"></label>
+      <button id="psave">Save</button>
+    </div>
+    <div class="muted" id="pstate"></div>
   </div>
 
 </div></div>
@@ -761,6 +797,54 @@ $('upload').onclick = () => {
     .then(r => { toast('BRB updated: ' + r.file); refresh(); })
     .catch(e => toast(e.message));
 };
+// ---- BRB playlist ----
+let playerLoaded = false;
+function renderPlayerRows() {
+  const m = $('pmode').value;
+  $('prow-yt').style.display = (m === 'youtube' || m === 'both') ? '' : 'none';
+  $('prow-clips').style.display = (m === 'clips' || m === 'both') ? '' : 'none';
+}
+function renderPlayerState(p) {
+  const c = p.clips || {};
+  let t = '';
+  if (p.mode === 'off') t = 'Off.';
+  if (p.mode === 'clips' || p.mode === 'both') {
+    t = c.busy ? `Loading clips (${c.progress || '...'})`
+      : `${c.count || 0} clips ready` + (c.updated ? ` (updated ${c.updated})` : '');
+    if (c.error) t += ' - ' + c.error;
+  }
+  if (p.mode === 'youtube') t = 'YouTube playlist on.';
+  if (p.mode !== 'off' && p.last_event) t += ' Last: ' + p.last_event;
+  $('pstate').textContent = t;
+}
+async function loadPlayer() {
+  const p = await (await fetch('/api/brb-player')).json();
+  if (!playerLoaded) {          // fill the form once, never over the user's typing
+    $('pmode').value = p.mode;
+    $('pyt').value = p.youtube_list ? 'https://www.youtube.com/playlist?list=' + p.youtube_list : '';
+    $('pchannel').value = p.clips_channel;
+    $('prange').value = p.clips_range;
+    $('pshuffle').checked = p.shuffle;
+    $('pvolume').value = p.volume;
+    renderPlayerRows();
+    playerLoaded = true;
+  }
+  renderPlayerState(p);
+}
+$('pmode').onchange = renderPlayerRows;
+$('psave').onclick = () =>
+  post('/api/brb-player', {
+    mode: $('pmode').value, youtube_list: $('pyt').value,
+    clips_channel: $('pchannel').value, clips_range: $('prange').value,
+    shuffle: $('pshuffle').checked, volume: +$('pvolume').value,
+  }).then(p => { toast('Playlist saved'); renderPlayerState(p); })
+    .catch(e => toast(e.message));
+$('pclipsnow').onclick = () =>
+  post('/api/brb-player/refresh-clips').then(() => toast('Reloading clips...'))
+    .catch(e => toast(e.message));
+loadPlayer().catch(() => {});
+setInterval(() => loadPlayer().catch(() => {}), 5000);
+
 $('logout').onclick = (e) => {
   e.preventDefault();
   post('/api/logout').finally(() => location.href = '/login');

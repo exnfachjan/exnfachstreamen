@@ -4,3 +4,4 @@ obsws-python==1.7.*
 requests==2.32.*
 python-multipart==0.0.20
 bcrypt==4.*
+yt-dlp

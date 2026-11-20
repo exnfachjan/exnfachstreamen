@@ -1,0 +1,175 @@
+<!doctype html>
+<!--
+  BRB player - loaded by OBS's "BRB Player" browser source while the BRB scene
+  is on air (see dashboard/app.py: apply_brb_player). Not a page for people.
+
+  Plays the channel's recent Twitch clips (downloaded by the dashboard,
+  served from /brb/clips/) and/or a YouTube playlist. In "both" mode: every
+  clip once, then one YouTube video, then the clips again.
+
+  The background stays transparent whenever nothing is playing, so the
+  uploaded BRB video/image underneath shows through as the fallback.
+
+  OBS restarts this page each time BRB comes on air; the position in each
+  queue is kept in localStorage so viewers don't see the same first clip on
+  every drop-out.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  #clip, #yt { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: none; background: #000; }
+  #clip { object-fit: contain; }
+  #title {
+    position: absolute; left: 3vw; bottom: 3vw; max-width: 70vw; display: none;
+    font: 600 2.2vw/1.3 system-ui, sans-serif; color: #fff;
+    background: rgba(0,0,0,.55); padding: .5vw 1vw; border-radius: .6vw;
+  }
+</style>
+</head>
+<body>
+<video id="clip" playsinline></video>
+<div id="yt"></div>
+<div id="title"></div>
+<script>
+const clipEl = document.getElementById('clip');
+// The YouTube API replaces the #yt div with its iframe (same id), so look it up each time.
+const ytEl = () => document.getElementById('yt');
+const titleEl = document.getElementById('title');
+let S = null;          // state from the dashboard
+let order = [];        // clip play order (indexes into S.clips)
+let ytPlayer = null, ytReady = false, ytFailures = 0;
+
+function report(msg) {
+  try { fetch('/brb/player/log', { method: 'POST', body: msg }); } catch (e) {}
+}
+window.onerror = (m) => report('js error: ' + m);
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+};
+
+function hideAll() {
+  clipEl.pause(); clipEl.style.display = 'none';
+  ytEl().style.display = 'none'; titleEl.style.display = 'none';
+  if (ytPlayer && ytReady) try { ytPlayer.pauseVideo(); } catch (e) {}
+}
+
+function shuffled(n) {
+  const a = [...Array(n).keys()];
+  for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+// ---- Twitch clips ----
+function playClip() {
+  if (!S.clips.length) return next('clips-empty');
+  let pos = store.get('clipPos', 0);
+  if (pos >= order.length) {        // whole queue played
+    store.set('clipPos', 0);
+    if (S.mode === 'both') return playYoutube();
+    pos = 0;
+    if (S.shuffle) order = shuffled(S.clips.length);
+  }
+  store.set('clipPos', pos + 1);
+  const c = S.clips[order[pos]];
+  hideAll();
+  clipEl.src = c.src;
+  clipEl.volume = S.volume / 100;
+  clipEl.style.display = 'block';
+  titleEl.textContent = c.title; titleEl.style.display = c.title ? 'block' : 'none';
+  report('clip: ' + c.title);
+  clipEl.play().catch(() => setTimeout(playClip, 1000));
+}
+clipEl.onended = () => playClip();
+clipEl.onerror = () => setTimeout(playClip, 1000);
+
+// ---- YouTube ----
+function loadYoutubeApi() {
+  const s = document.createElement('script');
+  s.onerror = () => report('youtube api could not be loaded');
+  s.src = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(s);
+}
+
+window.onYouTubeIframeAPIReady = () => {
+  ytPlayer = new YT.Player('yt', {
+    width: '100%', height: '100%',
+    playerVars: { listType: 'playlist', list: S.youtube_list, autoplay: 0, controls: 0,
+                  rel: 0, playsinline: 1, iv_load_policy: 3, origin: location.origin },
+    events: {
+      onReady: () => {
+        ytReady = true;
+        report('youtube ready, ' + ((ytPlayer.getPlaylist() || []).length) + ' videos');
+        ytPlayer.setVolume(S.volume);
+        ytPlayer.setLoop(true);
+        if (S.shuffle) ytPlayer.setShuffle(true);
+        if (S.mode === 'youtube' || !S.clips.length) playYoutube();
+      },
+      onStateChange: (e) => {
+        if (e.data === YT.PlayerState.PLAYING) {
+          ytFailures = 0;
+          try { report('youtube: ' + ytPlayer.getVideoData().title); } catch (err) {}
+          store.set('ytIndex', ytPlayer.getPlaylistIndex());
+        }
+        if (e.data === YT.PlayerState.ENDED) {
+          store.set('ytIndex', (ytPlayer.getPlaylistIndex() + 1));
+          // "both": one video, then back to the clips.
+          if (S.mode === 'both' && S.clips.length) playClip();
+        }
+      },
+      // 100/101/150: removed, private, or embedding disabled - just skip it.
+      onError: (e) => {
+        report('youtube error ' + e.data);
+        if (++ytFailures > 5) return next('yt-broken');
+        ytPlayer.nextVideo();
+      },
+    },
+  });
+};
+
+function playYoutube() {
+  if (!ytPlayer || !ytReady) {
+    // Not loaded (yet, or blocked): keep the clips going; onReady starts
+    // YouTube itself in youtube-only mode.
+    if (S.clips.length) playClip();
+    return;
+  }
+  hideAll();
+  ytEl().style.display = 'block';
+  const list = ytPlayer.getPlaylist() || [];
+  const i = store.get('ytIndex', 0);
+  if (list.length) ytPlayer.playVideoAt(i < list.length ? i : 0);
+  else ytPlayer.playVideo();
+}
+
+// Something can't play: fall back to whatever else is configured, else go
+// transparent and let the BRB media underneath show.
+function next(reason) {
+  if (reason === 'clips-empty' && S.youtube_list) { S.clips = []; return playYoutube(); }
+  if (reason === 'yt-broken') {
+    // Every video failing (150/152/153) is YouTube's bot check on a
+    // datacenter IP, not the playlist: OBS needs a signed-in YouTube session.
+    report('youtube blocked - sign in to YouTube inside OBS (docs/brb-player.md)');
+    if (S.clips.length) { S.mode = 'clips'; S.youtube_list = ''; return playClip(); }
+  }
+  hideAll();
+}
+
+fetch('/brb/player/state').then(r => r.json()).then(state => {
+  S = state;
+  if (S.mode === 'off') return;
+  order = S.shuffle ? shuffled(S.clips.length) : [...Array(S.clips.length).keys()];
+  if (S.youtube_list) loadYoutubeApi();
+  if (S.clips.length) playClip();
+  else if (!S.youtube_list) {
+    // Clips still downloading: stay transparent and look again shortly.
+    hideAll();
+    setTimeout(() => location.reload(), 20000);
+  }
+}).catch(() => { hideAll(); setTimeout(() => location.reload(), 20000); });
+</script>
+</body>
+</html>
