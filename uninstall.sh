@@ -82,6 +82,7 @@ if [ "$PURGE" = 1 ]; then
         chown -R root:root .
         userdel -r "$APP_USER" 2>/dev/null || userdel "$APP_USER"
         ok "system user $APP_USER removed"
+        git config --system --unset-all safe.directory "^$(pwd)\$" 2>/dev/null || true
     elif [ -n "$APP_USER" ]; then
         skip "user $APP_USER was not created by install.sh - left alone"
     fi

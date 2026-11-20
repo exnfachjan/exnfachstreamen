@@ -165,6 +165,12 @@ ensure_app_user() {
         ok "created system user $u (no password, no login shell)"
     fi
     getent group docker >/dev/null && usermod -aG docker "$u"
+    # The checkout now belongs to $u, so a plain `git pull` as root would hit
+    # "dubious ownership". Mark this one directory safe system-wide.
+    if ! git config --system --get-all safe.directory 2>/dev/null | grep -qxF "$PWD"; then
+        git config --system --add safe.directory "$PWD"
+        ok "git may be used as root in $PWD (safe.directory)"
+    fi
 }
 
 # Everything in the checkout back to the app user. Re-run after anything that
