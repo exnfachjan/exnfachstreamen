@@ -3,9 +3,12 @@
   BRB player - loaded by OBS's "BRB Player" browser source while the BRB scene
   is on air (see dashboard/app.py: apply_brb_player). Not a page for people.
 
-  Plays the channel's recent Twitch clips (downloaded by the dashboard,
-  served from /brb/clips/) and/or a YouTube playlist. In "both" mode: every
-  clip once, then one YouTube video, then the clips again.
+  Plays the channel's Twitch clips (downloaded and converted by the
+  dashboard, served from /brb/clips/) and/or a YouTube playlist. In "both"
+  mode: every clip once, then one YouTube video, then the clips again.
+
+  Clip overlay: title, "clipped by", date and game slide in for a few seconds
+  at the start of each clip; optional countdown in the corner.
 
   The background stays transparent whenever nothing is playing, so the
   uploaded BRB video/image underneath shows through as the fallback.
@@ -18,27 +21,60 @@
 <head>
 <meta charset="utf-8">
 <style>
-  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
+               font-family: system-ui, "Segoe UI", Roboto, sans-serif; }
   #clip, #yt { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: none; background: #000; }
   #clip { object-fit: contain; }
-  #title {
-    position: absolute; left: 3vw; bottom: 3vw; max-width: 70vw; display: none;
-    font: 600 2.2vw/1.3 system-ui, sans-serif; color: #fff;
-    background: rgba(0,0,0,.55); padding: .5vw 1vw; border-radius: .6vw;
+
+  /* Info card: bottom left, slides in at clip start, out after INFO_MS. */
+  #info {
+    position: absolute; left: 3vw; bottom: 3.5vw; max-width: 62vw;
+    padding: 1.1vw 1.5vw 1.1vw 1.3vw; border-radius: .9vw;
+    background: rgba(10, 10, 16, .78); color: #fff;
+    border-left: .35vw solid #9b6cff;
+    box-shadow: 0 .4vw 2vw rgba(0,0,0,.45);
+    opacity: 0; transform: translateX(-2vw);
+    transition: opacity .45s ease, transform .45s ease;
   }
+  #info.show { opacity: 1; transform: none; }
+  #info .t { font-size: 2.15vw; font-weight: 750; line-height: 1.2;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #info .s { font-size: 1.25vw; margin-top: .45vw; color: rgba(255,255,255,.72); }
+  #info .s b { color: #c7b0ff; font-weight: 650; }
+
+  /* Countdown: bottom right, a ring that empties plus the seconds left. */
+  #timer { position: absolute; right: 2.6vw; bottom: 2.6vw; width: 5vw; height: 5vw; display: none; }
+  #timer svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  #timer circle { fill: none; stroke-width: 3.2; }
+  #timer .bg { stroke: rgba(0,0,0,.5); fill: rgba(10,10,16,.6); }
+  #timer .fg { stroke: #9b6cff; stroke-linecap: round; transition: stroke-dashoffset .25s linear; }
+  #timer span { position: absolute; inset: 0; display: grid; place-items: center;
+                color: #fff; font-size: 1.5vw; font-weight: 750; }
 </style>
 </head>
 <body>
 <video id="clip" playsinline></video>
 <div id="yt"></div>
-<div id="title"></div>
+<div id="info"><div class="t"></div><div class="s"></div></div>
+<div id="timer">
+  <svg viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="16"/><circle class="fg" cx="18" cy="18" r="16"/></svg>
+  <span></span>
+</div>
 <script>
+const INFO_MS = 6000;
+const RING = 2 * Math.PI * 16;
 const clipEl = document.getElementById('clip');
+const infoEl = document.getElementById('info');
+const timerEl = document.getElementById('timer');
+const ringEl = timerEl.querySelector('.fg');
+ringEl.style.strokeDasharray = RING;
 // The YouTube API replaces the #yt div with its iframe (same id), so look it up each time.
 const ytEl = () => document.getElementById('yt');
-const titleEl = document.getElementById('title');
+
 let S = null;          // state from the dashboard
 let order = [];        // clip play order (indexes into S.clips)
+let cur = null;        // clip on screen
+let infoTimer = null;
 let ytPlayer = null, ytReady = false, ytFailures = 0;
 
 function report(msg) {
@@ -53,7 +89,9 @@ const store = {
 
 function hideAll() {
   clipEl.pause(); clipEl.style.display = 'none';
-  ytEl().style.display = 'none'; titleEl.style.display = 'none';
+  ytEl().style.display = 'none';
+  infoEl.classList.remove('show'); timerEl.style.display = 'none';
+  cur = null;
   if (ytPlayer && ytReady) try { ytPlayer.pauseVideo(); } catch (e) {}
 }
 
@@ -63,7 +101,27 @@ function shuffled(n) {
   return a;
 }
 
+function esc(t) { const d = document.createElement('div'); d.textContent = t || ''; return d.innerHTML; }
+
+function showInfo(c) {
+  if (!S.overlay_info) return;
+  const parts = [];
+  if (c.clipper) parts.push(`Clipped by <b>${esc(c.clipper)}</b>`);
+  if (c.timestamp) parts.push(new Date(c.timestamp * 1000).toLocaleDateString('de-DE'));
+  if (c.game) parts.push(esc(c.game));
+  infoEl.querySelector('.t').textContent = c.title || 'Clip';
+  infoEl.querySelector('.s').innerHTML = parts.join(' &middot; ');
+  infoEl.classList.add('show');
+  clearTimeout(infoTimer);
+  infoTimer = setTimeout(() => infoEl.classList.remove('show'), INFO_MS);
+}
+
 // ---- Twitch clips ----
+function clipLength() {
+  const d = clipEl.duration || (cur && cur.duration) || 0;
+  return S.cut_at ? Math.min(d, S.cut_at) : d;
+}
+
 function playClip() {
   if (!S.clips.length) return next('clips-empty');
   let pos = store.get('clipPos', 0);
@@ -76,13 +134,26 @@ function playClip() {
   store.set('clipPos', pos + 1);
   const c = S.clips[order[pos]];
   hideAll();
+  cur = c;
   clipEl.src = c.src;
   clipEl.volume = S.volume / 100;
   clipEl.style.display = 'block';
-  titleEl.textContent = c.title; titleEl.style.display = c.title ? 'block' : 'none';
-  report('clip: ' + c.title);
+  timerEl.style.display = S.overlay_timer ? 'block' : 'none';
+  showInfo(c);
+  report('clip: ' + c.title + (c.clipper ? ' (by ' + c.clipper + ')' : ''));
   clipEl.play().catch(() => setTimeout(playClip, 1000));
 }
+
+clipEl.ontimeupdate = () => {
+  if (!cur) return;
+  const len = clipLength();
+  if (S.cut_at && clipEl.currentTime >= S.cut_at) return playClip();
+  if (S.overlay_timer && len) {
+    const left = Math.max(0, len - clipEl.currentTime);
+    timerEl.querySelector('span').textContent = Math.ceil(left);
+    ringEl.style.strokeDashoffset = RING * (1 - left / len);
+  }
+};
 clipEl.onended = () => playClip();
 clipEl.onerror = () => setTimeout(playClip, 1000);
 

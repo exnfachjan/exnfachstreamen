@@ -34,6 +34,7 @@ import json
 import os
 import re
 import itertools
+import random
 import secrets
 import shlex
 import subprocess
@@ -102,7 +103,15 @@ SOURCE_BRB_IMAGE = "BRB Image"
 SOURCE_BRB_PLAYER = "BRB Player"
 PLAYER_URL = "http://dashboard:8000/brb/player"
 PLAYER_MODES = ("off", "youtube", "clips", "both")
-CLIP_RANGES = ("24hr", "7d", "30d", "all")
+CLIP_RANGES = ("24hr", "7d", "30d", "6m", "1y", "all")
+# Twitch's listing filters 24hr/7d/30d itself; 6m/1y are listed all-time and
+# cut here. Applied to every range anyway, as a check on the listing.
+CLIP_RANGE_DAYS = {"24hr": 1, "7d": 7, "30d": 30, "6m": 183, "1y": 365}
+# top = most viewed first; random = any clip in range, a few swapped per refresh.
+CLIP_PICKS = ("top", "random")
+CLIP_ROTATE = 5
+CLIP_MAX_LENS = (0, 15, 20, 30, 45, 60)   # 0 = no limit
+CLIPPER_RE = re.compile(r"^[A-Za-z0-9_]{2,25}$")
 CLIPS_DIR = MEDIA_DIR / "clips"
 CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 CLIPS_INDEX = CLIPS_DIR / "index.json"
@@ -162,6 +171,13 @@ def load_config():
         "youtube_list": player.get("youtube_list") or "",
         "clips_channel": player.get("clips_channel") or "",
         "clips_range": player.get("clips_range") if player.get("clips_range") in CLIP_RANGES else "7d",
+        "clips_pick": player.get("clips_pick") if player.get("clips_pick") in CLIP_PICKS else "top",
+        "clips_max_len": player.get("clips_max_len") if player.get("clips_max_len") in CLIP_MAX_LENS else 0,
+        "clips_len_mode": "cut" if player.get("clips_len_mode") == "cut" else "skip",
+        "clips_exclude": [w for w in player.get("clips_exclude") or [] if isinstance(w, str)][:30],
+        "clips_creators": [w for w in player.get("clips_creators") or [] if isinstance(w, str)][:30],
+        "overlay_info": player.get("overlay_info") is not False,
+        "overlay_timer": bool(player.get("overlay_timer", False)),
         "shuffle": bool(player.get("shuffle", True)),
         "volume": max(0, min(100, int(player.get("volume", 60)))),
     }
@@ -762,6 +778,10 @@ async def upload_brb(file: UploadFile):
 # ---------- BRB player (optional YouTube playlist / Twitch clip queue) ----------
 
 _clips_lock = threading.Lock()
+# Set when a refresh is requested while one is running (e.g. settings saved
+# mid-download): the running one would finish with the OLD settings, so it
+# re-runs once more right after instead of the request being dropped.
+_clips_pending = threading.Event()
 _clips_status = {"count": 0, "updated": None, "error": None, "busy": False, "progress": None}
 
 
@@ -789,37 +809,95 @@ def transcode_clip(src, dest):
     tmp.replace(dest)
 
 
+# Settings that decide WHICH clips are on disk; a change to any of them
+# triggers a refresh. (Overlay, volume, shuffle only affect playback.)
+CLIP_SELECTION_KEYS = ("clips_channel", "clips_range", "clips_pick", "clips_max_len",
+                       "clips_len_mode", "clips_exclude", "clips_creators")
+
+
+def clip_candidates(p, listing):
+    """Filter the channel's clip listing by date, length and title words.
+    The flat listing already carries title, duration, date and views, so
+    this costs no request per clip."""
+    cutoff = time.time() - CLIP_RANGE_DAYS[p["clips_range"]] * 86400 \
+        if p["clips_range"] in CLIP_RANGE_DAYS else 0
+    words = [w.casefold() for w in p["clips_exclude"]]
+    out = []
+    for r in listing:
+        if not r or not r.get("url"):
+            continue
+        if (r.get("timestamp") or 0) < cutoff:
+            continue
+        if p["clips_max_len"] and p["clips_len_mode"] == "skip" \
+                and (r.get("duration") or 0) > p["clips_max_len"]:
+            continue
+        title = (r.get("title") or "").casefold()
+        if any(w in title for w in words):
+            continue
+        out.append(r)
+    return out
+
+
 def refresh_clips():
-    """Fetch the channel's top clips in the configured range.
+    """Fill /media/brb/clips with up to MAX_CLIPS clips of the channel.
 
     yt-dlp lists them through Twitch's public site API, so no Twitch app or
-    token is needed. Only clips not already on disk are downloaded and
-    converted; anything no longer in the list is deleted, so the folder never
-    holds more than MAX_CLIPS.
+    token is needed. "top" takes the most viewed; "random" keeps most of what
+    is already on disk and swaps CLIP_ROTATE for new random ones per refresh,
+    so the BRB screen changes over the day without re-downloading everything.
+    Clips already on disk are reused; the rest are deleted.
     """
     p = load_config()["brb_player"]
     if p["mode"] not in ("clips", "both") or not p["clips_channel"]:
         return
     if not _clips_lock.acquire(blocking=False):
-        return  # a refresh is already running
+        _clips_pending.set()   # picked up when the running refresh ends
+        return
+    _clips_pending.clear()
     _clips_status.update(busy=True, error=None, progress="listing clips")
     try:
         from yt_dlp import YoutubeDL  # heavy import, only when used
-        url = (f"https://www.twitch.tv/{p['clips_channel']}/clips"
-               f"?filter=clips&range={p['clips_range']}")
+        rng = p["clips_range"] if p["clips_range"] in ("24hr", "7d", "30d") else "all"
+        url = f"https://www.twitch.tv/{p['clips_channel']}/clips?filter=clips&range={rng}"
         quiet = {"quiet": True, "no_warnings": True, "noprogress": True}
-        with YoutubeDL(quiet) as ydl:
-            listing = ydl.extract_info(url, download=False, process=False) or {}
-            refs = list(itertools.islice(listing.get("entries") or [], MAX_CLIPS))
+        with YoutubeDL({**quiet, "extract_flat": True}) as ydl:
+            listing = (ydl.extract_info(url, download=False) or {}).get("entries") or []
+        cands = clip_candidates(p, list(listing))
 
-        clips = []
+        prev = {c.get("id"): c for c in read_clip_index()
+                if c.get("id") and (CLIPS_DIR / c["file"]).exists()}
+        if p["clips_pick"] == "top":
+            ordered = sorted(cands, key=lambda r: r.get("view_count") or 0, reverse=True)
+        else:
+            have = [r for r in cands if r.get("id") in prev]
+            new = [r for r in cands if r.get("id") not in prev]
+            random.shuffle(have)
+            random.shuffle(new)
+            keep_n = max(0, MAX_CLIPS - CLIP_ROTATE)
+            ordered = have[:keep_n] + new + have[keep_n:]
+
+        creators = {c.casefold() for c in p["clips_creators"]}
+        clips, tried = [], 0
         dl_opts = {**quiet, "format": "720/best[height<=720]/best",
                    "outtmpl": str(CLIPS_DIR / "%(id)s.src.%(ext)s")}
         with YoutubeDL(dl_opts) as ydl:
-            for n, ref in enumerate(refs, 1):
-                _clips_status["progress"] = f"clip {n}/{len(refs)}"
+            for ref in ordered:
+                if len(clips) >= MAX_CLIPS or tried >= MAX_CLIPS * 4:
+                    break
+                _clips_status["progress"] = f"clip {len(clips) + 1}/{MAX_CLIPS}"
+                old = prev.get(ref.get("id"))
+                if old:
+                    if not creators or old.get("clipper", "").casefold() in creators:
+                        clips.append(old)
+                    continue
+                tried += 1
                 try:
                     info = ydl.extract_info(ref["url"], download=False)
+                    clipper = info.get("uploader") or ""
+                    if creators and clipper.casefold() not in creators:
+                        continue
+                    if not clip_candidates(p, [{**info, "url": ref["url"]}]):
+                        continue   # the clip's own metadata fails a filter
                     final = CLIPS_DIR / f"{info['id']}.mp4"
                     if not final.exists():
                         info = ydl.extract_info(ref["url"], download=True)
@@ -829,28 +907,35 @@ def refresh_clips():
                         finally:
                             src.unlink(missing_ok=True)
                     clips.append({
-                        "file": final.name,
+                        "id": info["id"], "file": final.name,
                         "title": info.get("title") or "",
                         "duration": info.get("duration") or 0,
                         "timestamp": info.get("timestamp") or 0,
+                        "views": info.get("view_count") or 0,
+                        "clipper": clipper,
+                        "game": (info.get("categories") or [""])[0] or "",
                     })
                 except Exception:
                     continue  # one broken clip must not cost the rest
 
-        clips.sort(key=lambda c: c["timestamp"], reverse=True)  # newest first
+        if p["clips_pick"] == "top":
+            clips.sort(key=lambda c: c.get("views") or 0, reverse=True)
         keep = {c["file"] for c in clips} | {CLIPS_INDEX.name}
         for f in CLIPS_DIR.iterdir():
             if f.name not in keep:
                 f.unlink(missing_ok=True)
         CLIPS_INDEX.write_text(json.dumps(clips))
-        _clips_status.update(count=len(clips), updated=time.strftime("%H:%M"))
+        _clips_status.update(count=len(clips), updated=time.strftime("%H:%M"),
+                             candidates=len(cands))
         if not clips:
-            _clips_status["error"] = f"no clips for {p['clips_channel']} in range {p['clips_range']}"
+            _clips_status["error"] = "no clips match these settings"
     except Exception as e:
         _clips_status["error"] = str(e)[:200]
     finally:
         _clips_status.update(busy=False, progress=None)
         _clips_lock.release()
+    if _clips_pending.is_set():
+        refresh_clips()
 
 
 def clips_loop():
@@ -919,6 +1004,13 @@ class BrbPlayerReq(BaseModel):
     youtube_list: str = ""
     clips_channel: str = ""
     clips_range: str = "7d"
+    clips_pick: str = "top"
+    clips_max_len: int = 0
+    clips_len_mode: str = "skip"
+    clips_exclude: str = ""
+    clips_creators: str = ""
+    overlay_info: bool = True
+    overlay_timer: bool = False
     shuffle: bool = True
     volume: int = 60
 
@@ -949,6 +1041,16 @@ def set_brb_player(body: BrbPlayerReq):
         raise HTTPException(status_code=400, detail="unknown mode")
     if body.clips_range not in CLIP_RANGES:
         raise HTTPException(status_code=400, detail="unknown clip range")
+    if body.clips_pick not in CLIP_PICKS:
+        raise HTTPException(status_code=400, detail="unknown clip pick")
+    if body.clips_max_len not in CLIP_MAX_LENS:
+        raise HTTPException(status_code=400, detail="unknown clip length")
+    exclude = [w.strip() for w in body.clips_exclude.split(",") if w.strip()][:30]
+    if any(len(w) > 40 for w in exclude):
+        raise HTTPException(status_code=400, detail="exclude words: 40 characters max each")
+    creators = [c.strip().lstrip("@") for c in body.clips_creators.split(",") if c.strip()][:30]
+    if any(not CLIPPER_RE.match(c) for c in creators):
+        raise HTTPException(status_code=400, detail="clippers: Twitch user names, comma separated")
     youtube_list = parse_playlist(body.youtube_list)
     channel = body.clips_channel.strip().lstrip("@").lower()
     if channel.startswith("http") or "twitch.tv/" in channel:
@@ -966,13 +1068,16 @@ def set_brb_player(body: BrbPlayerReq):
         cfg["brb_player"] = {
             "mode": body.mode, "youtube_list": youtube_list,
             "clips_channel": channel, "clips_range": body.clips_range,
+            "clips_pick": body.clips_pick, "clips_max_len": body.clips_max_len,
+            "clips_len_mode": "cut" if body.clips_len_mode == "cut" else "skip",
+            "clips_exclude": exclude, "clips_creators": creators,
+            "overlay_info": body.overlay_info, "overlay_timer": body.overlay_timer,
             "shuffle": body.shuffle, "volume": max(0, min(100, body.volume)),
         }
         save_config(cfg)
         player = cfg["brb_player"]
 
-    if (player["clips_channel"], player["clips_range"]) != (old["clips_channel"], old["clips_range"]) \
-            or not read_clip_index():
+    if any(player[k] != old[k] for k in CLIP_SELECTION_KEYS) or not read_clip_index():
         threading.Thread(target=refresh_clips, daemon=True).start()
     with_obs(lambda cl: apply_brb_player(cl, player))
     return {**player, "clips": dict(_clips_status)}
@@ -999,8 +1104,12 @@ def brb_player_state():
         "mode": p["mode"],
         "youtube_list": p["youtube_list"] if p["mode"] in ("youtube", "both") else "",
         "shuffle": p["shuffle"], "volume": p["volume"],
-        "clips": [{"src": f"/brb/clips/{c['file']}", "title": c["title"],
-                   "duration": c["duration"]} for c in clips],
+        "overlay_info": p["overlay_info"], "overlay_timer": p["overlay_timer"],
+        "cut_at": p["clips_max_len"] if p["clips_len_mode"] == "cut" else 0,
+        "clips": [{"src": f"/brb/clips/{c['file']}", "title": c.get("title", ""),
+                   "duration": c.get("duration", 0), "clipper": c.get("clipper", ""),
+                   "game": c.get("game", ""), "timestamp": c.get("timestamp", 0)}
+                  for c in clips],
     }
 
 

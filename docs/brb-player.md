@@ -17,6 +17,19 @@ playlist is on so the two don't overlap.
 
 ## Twitch clips
 
+| Setting | Effect |
+|---|---|
+| Top / Random | most viewed first, or any clip in range (5 swapped for new ones every 30 min) |
+| Range | last 24 h, 7 days, 30 days, 6 months, year, or all time |
+| Max length | skip longer clips, or play them and cut off at the limit |
+| Skip titles containing | comma-separated words; matching clips are left out |
+| Only clips by | comma-separated clipper names; empty = everyone |
+| Show title, clipper & date | info card bottom left for the first 6 s of each clip |
+| Countdown | ring with the seconds left, bottom right |
+
+Not included: "prefer the current category", which needs the official Twitch
+API and an app key.
+
 No Twitch app or token needed. The dashboard fetches up to 20 clips, converts
 them once to H.264 (Twitch delivers clips as HEVC only, which OBS's browser
 cannot decode), stores them in `data/media/brb/clips/` and refreshes the list

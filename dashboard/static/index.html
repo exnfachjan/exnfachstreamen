@@ -270,7 +270,7 @@
        placeholder is cut mid-word and neither field can show what you typed
        - and a Twitch key is exactly the thing you need to see in full. */
     .row input[type=text], .row input[type=password] { flex-basis: 100%; }
-    #addlivescene, #addchannel, #upload, #brbfile, #psave, #pclipsnow, #prange { flex: 1 1 100%; }
+    #addlivescene, #addchannel, #upload, #brbfile, #psave, #pclipsnow, #prange, #ppick, #pmaxlen, #plenmode { flex: 1 1 100%; }
   }
 
   #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
@@ -408,15 +408,47 @@
     <div class="row" id="prow-yt">
       <input id="pyt" type="text" placeholder="YouTube playlist link (with list=...)">
     </div>
-    <div class="row" id="prow-clips">
-      <input id="pchannel" type="text" placeholder="Twitch channel name">
-      <select id="prange">
-        <option value="24hr">last 24 h</option>
-        <option value="7d">last 7 days</option>
-        <option value="30d">last 30 days</option>
-        <option value="all">all time</option>
-      </select>
-      <button id="pclipsnow" class="btn-gray btn-sm">Reload clips</button>
+    <div id="prow-clips">
+      <div class="row">
+        <input id="pchannel" type="text" placeholder="Twitch channel name">
+        <select id="ppick">
+          <option value="top">Top - most viewed</option>
+          <option value="random">Random - any clip</option>
+        </select>
+      </div>
+      <div class="row">
+        <select id="prange">
+          <option value="24hr">last 24 h</option>
+          <option value="7d">last 7 days</option>
+          <option value="30d">last 30 days</option>
+          <option value="6m">last 6 months</option>
+          <option value="1y">last year</option>
+          <option value="all">all time</option>
+        </select>
+        <select id="pmaxlen">
+          <option value="0">any length</option>
+          <option value="15">max 15 s</option>
+          <option value="20">max 20 s</option>
+          <option value="30">max 30 s</option>
+          <option value="45">max 45 s</option>
+          <option value="60">max 60 s</option>
+        </select>
+        <select id="plenmode">
+          <option value="skip">skip longer clips</option>
+          <option value="cut">cut them off</option>
+        </select>
+      </div>
+      <div class="row">
+        <input id="pexclude" type="text" placeholder="Skip titles containing (comma separated)">
+      </div>
+      <div class="row">
+        <input id="pcreators" type="text" placeholder="Only clips by these clippers (comma separated, empty = all)">
+      </div>
+      <div class="row">
+        <label class="muted"><input id="pinfo" type="checkbox"> Show title, clipper &amp; date</label>
+        <label class="muted"><input id="ptimer" type="checkbox"> Countdown</label>
+        <button id="pclipsnow" class="btn-gray btn-sm">Reload clips</button>
+      </div>
     </div>
     <div class="row">
       <label class="muted"><input id="pshuffle" type="checkbox"> Shuffle</label>
@@ -810,7 +842,8 @@ function renderPlayerState(p) {
   if (p.mode === 'off') t = 'Off.';
   if (p.mode === 'clips' || p.mode === 'both') {
     t = c.busy ? `Loading clips (${c.progress || '...'})`
-      : `${c.count || 0} clips ready` + (c.updated ? ` (updated ${c.updated})` : '');
+      : `${c.count || 0} clips ready` + (c.candidates != null ? ` of ${c.candidates} matching` : '')
+        + (c.updated ? ` (updated ${c.updated})` : '');
     if (c.error) t += ' - ' + c.error;
   }
   if (p.mode === 'youtube') t = 'YouTube playlist on.';
@@ -824,6 +857,13 @@ async function loadPlayer() {
     $('pyt').value = p.youtube_list ? 'https://www.youtube.com/playlist?list=' + p.youtube_list : '';
     $('pchannel').value = p.clips_channel;
     $('prange').value = p.clips_range;
+    $('ppick').value = p.clips_pick;
+    $('pmaxlen').value = String(p.clips_max_len);
+    $('plenmode').value = p.clips_len_mode;
+    $('pexclude').value = (p.clips_exclude || []).join(', ');
+    $('pcreators').value = (p.clips_creators || []).join(', ');
+    $('pinfo').checked = p.overlay_info;
+    $('ptimer').checked = p.overlay_timer;
     $('pshuffle').checked = p.shuffle;
     $('pvolume').value = p.volume;
     renderPlayerRows();
@@ -836,6 +876,10 @@ $('psave').onclick = () =>
   post('/api/brb-player', {
     mode: $('pmode').value, youtube_list: $('pyt').value,
     clips_channel: $('pchannel').value, clips_range: $('prange').value,
+    clips_pick: $('ppick').value, clips_max_len: +$('pmaxlen').value,
+    clips_len_mode: $('plenmode').value, clips_exclude: $('pexclude').value,
+    clips_creators: $('pcreators').value,
+    overlay_info: $('pinfo').checked, overlay_timer: $('ptimer').checked,
     shuffle: $('pshuffle').checked, volume: +$('pvolume').value,
   }).then(p => { toast('Playlist saved'); renderPlayerState(p); })
     .catch(e => toast(e.message));
