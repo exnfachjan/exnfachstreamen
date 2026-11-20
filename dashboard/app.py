@@ -918,6 +918,12 @@ def refresh_clips():
                 except Exception:
                     continue  # one broken clip must not cost the rest
 
+        if not clips:
+            # Nothing came back (filters too strict, Twitch hiccup, rate
+            # limit): keep playing what is on disk rather than wiping it.
+            _clips_status.update(candidates=len(cands),
+                                 error="no clips match these settings - keeping the previous ones")
+            return
         if p["clips_pick"] == "top":
             clips.sort(key=lambda c: c.get("views") or 0, reverse=True)
         keep = {c["file"] for c in clips} | {CLIPS_INDEX.name}
@@ -927,8 +933,6 @@ def refresh_clips():
         CLIPS_INDEX.write_text(json.dumps(clips))
         _clips_status.update(count=len(clips), updated=time.strftime("%H:%M"),
                              candidates=len(cands))
-        if not clips:
-            _clips_status["error"] = "no clips match these settings"
     except Exception as e:
         _clips_status["error"] = str(e)[:200]
     finally:
