@@ -41,7 +41,6 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 import bcrypt
 import requests
@@ -96,13 +95,15 @@ SCENE_BRB = "BRB"
 SOURCE_BRB_MEDIA = "BRB Media"
 SOURCE_BRB_IMAGE = "BRB Image"
 
-# Optional BRB playlist: a YouTube playlist and/or a queue of the channel's
-# recent Twitch clips, played by a browser source on top of the BRB media.
+# Optional BRB clip player: a queue of the channel's Twitch clips, played
+# by a browser source on top of the BRB media. (A YouTube playlist mode
+# existed briefly; YouTube refuses to play on datacenter IPs, so it was
+# removed - see git history.)
 # The page itself is static/brb-player.html, served from here; OBS loads it
 # over the compose network, so it never goes through Caddy's login.
 SOURCE_BRB_PLAYER = "BRB Player"
 PLAYER_URL = "http://dashboard:8000/brb/player"
-PLAYER_MODES = ("off", "youtube", "clips", "both")
+PLAYER_MODES = ("off", "clips")
 CLIP_RANGES = ("24hr", "7d", "30d", "6m", "1y", "all")
 # Twitch's listing filters 24hr/7d/30d itself; 6m/1y are listed all-time and
 # cut here. Applied to every range anyway, as a check on the listing.
@@ -118,7 +119,6 @@ CLIPS_INDEX = CLIPS_DIR / "index.json"
 # Clips are 5-60 s each; this caps the download at a few hundred MB.
 MAX_CLIPS = int(os.environ.get("BRB_MAX_CLIPS", "20"))
 CLIPS_REFRESH_SEC = int(os.environ.get("BRB_CLIPS_REFRESH_SEC", "1800"))
-YT_LIST_RE = re.compile(r"^[A-Za-z0-9_-]{10,64}$")
 TWITCH_LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{3,25}$")
 
 # Live scenes: several layouts (wide shot, PiP, chat overlay, ...) that all
@@ -167,8 +167,8 @@ def load_config():
     cfg.setdefault("brb_file", None)
     player = cfg.get("brb_player") if isinstance(cfg.get("brb_player"), dict) else {}
     cfg["brb_player"] = {
-        "mode": player.get("mode") if player.get("mode") in PLAYER_MODES else "off",
-        "youtube_list": player.get("youtube_list") or "",
+        # "both" from the YouTube days keeps its clips; "youtube" turns off.
+        "mode": "clips" if player.get("mode") in ("clips", "both") else "off",
         "clips_channel": player.get("clips_channel") or "",
         "clips_range": player.get("clips_range") if player.get("clips_range") in CLIP_RANGES else "7d",
         "clips_pick": player.get("clips_pick") if player.get("clips_pick") in CLIP_PICKS else "top",
@@ -775,7 +775,7 @@ async def upload_brb(file: UploadFile):
     return {"ok": True, "file": dest.name}
 
 
-# ---------- BRB player (optional YouTube playlist / Twitch clip queue) ----------
+# ---------- BRB clip player (optional Twitch clip queue) ----------
 
 _clips_lock = threading.Lock()
 # Set when a refresh is requested while one is running (e.g. settings saved
@@ -848,7 +848,7 @@ def refresh_clips():
     Clips already on disk are reused; the rest are deleted.
     """
     p = load_config()["brb_player"]
-    if p["mode"] not in ("clips", "both") or not p["clips_channel"]:
+    if p["mode"] != "clips" or not p["clips_channel"]:
         return
     if not _clips_lock.acquire(blocking=False):
         _clips_pending.set()   # picked up when the running refresh ends
@@ -1005,7 +1005,6 @@ threading.Thread(target=apply_brb_player_on_boot, daemon=True).start()
 
 class BrbPlayerReq(BaseModel):
     mode: str
-    youtube_list: str = ""
     clips_channel: str = ""
     clips_range: str = "7d"
     clips_pick: str = "top"
@@ -1017,20 +1016,6 @@ class BrbPlayerReq(BaseModel):
     overlay_timer: bool = False
     shuffle: bool = True
     volume: int = 60
-
-
-def parse_playlist(value):
-    """Accept a playlist URL (any youtube.com link with list=) or a bare ID."""
-    value = value.strip()
-    if not value:
-        return ""
-    if "://" in value or "youtube" in value or "youtu.be" in value:
-        lst = parse_qs(urlparse(value if "://" in value else "https://" + value).query).get("list", [""])[0]
-    else:
-        lst = value
-    if not YT_LIST_RE.match(lst):
-        raise HTTPException(status_code=400, detail="not a YouTube playlist link (needs list=...)")
-    return lst
 
 
 @app.get("/api/brb-player")
@@ -1055,22 +1040,19 @@ def set_brb_player(body: BrbPlayerReq):
     creators = [c.strip().lstrip("@") for c in body.clips_creators.split(",") if c.strip()][:30]
     if any(not CLIPPER_RE.match(c) for c in creators):
         raise HTTPException(status_code=400, detail="clippers: Twitch user names, comma separated")
-    youtube_list = parse_playlist(body.youtube_list)
     channel = body.clips_channel.strip().lstrip("@").lower()
     if channel.startswith("http") or "twitch.tv/" in channel:
         channel = channel.split("twitch.tv/")[-1].split("/")[0].split("?")[0]
     if channel and not TWITCH_LOGIN_RE.match(channel):
         raise HTTPException(status_code=400, detail="not a Twitch channel name")
-    if body.mode in ("youtube", "both") and not youtube_list:
-        raise HTTPException(status_code=400, detail="YouTube playlist link required")
-    if body.mode in ("clips", "both") and not channel:
+    if body.mode == "clips" and not channel:
         raise HTTPException(status_code=400, detail="Twitch channel required")
 
     with _cfg_lock:
         cfg = load_config()
         old = cfg["brb_player"]
         cfg["brb_player"] = {
-            "mode": body.mode, "youtube_list": youtube_list,
+            "mode": body.mode,
             "clips_channel": channel, "clips_range": body.clips_range,
             "clips_pick": body.clips_pick, "clips_max_len": body.clips_max_len,
             "clips_len_mode": "cut" if body.clips_len_mode == "cut" else "skip",
@@ -1103,10 +1085,9 @@ def brb_player_page():
 @app.get("/brb/player/state")
 def brb_player_state():
     p = load_config()["brb_player"]
-    clips = read_clip_index() if p["mode"] in ("clips", "both") else []
+    clips = read_clip_index() if p["mode"] == "clips" else []
     return {
         "mode": p["mode"],
-        "youtube_list": p["youtube_list"] if p["mode"] in ("youtube", "both") else "",
         "shuffle": p["shuffle"], "volume": p["volume"],
         "overlay_info": p["overlay_info"], "overlay_timer": p["overlay_timer"],
         "cut_at": p["clips_max_len"] if p["clips_len_mode"] == "cut" else 0,

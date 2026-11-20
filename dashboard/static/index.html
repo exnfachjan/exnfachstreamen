@@ -396,17 +396,12 @@
     </div>
     <div class="muted" id="brbstate"></div>
 
-    <h2 style="margin-top:20px">Playlist <span class="muted" style="text-transform:none">optional - plays over the BRB media while you're away</span></h2>
+    <h2 style="margin-top:20px">Clips <span class="muted" style="text-transform:none">optional - your Twitch clips over the BRB media while you're away</span></h2>
     <div class="row">
       <select id="pmode">
         <option value="off">Off - just the BRB media</option>
-        <option value="youtube">YouTube playlist</option>
-        <option value="clips">My Twitch clips</option>
-        <option value="both">Clips, then a YouTube video, repeat</option>
+        <option value="clips">Play my Twitch clips</option>
       </select>
-    </div>
-    <div class="row" id="prow-yt">
-      <input id="pyt" type="text" placeholder="YouTube playlist link (with list=...)">
     </div>
     <div id="prow-clips">
       <div class="row">
@@ -833,20 +828,18 @@ $('upload').onclick = () => {
 let playerLoaded = false;
 function renderPlayerRows() {
   const m = $('pmode').value;
-  $('prow-yt').style.display = (m === 'youtube' || m === 'both') ? '' : 'none';
-  $('prow-clips').style.display = (m === 'clips' || m === 'both') ? '' : 'none';
+  $('prow-clips').style.display = m === 'clips' ? '' : 'none';
 }
 function renderPlayerState(p) {
   const c = p.clips || {};
   let t = '';
   if (p.mode === 'off') t = 'Off.';
-  if (p.mode === 'clips' || p.mode === 'both') {
+  if (p.mode === 'clips') {
     t = c.busy ? `Loading clips (${c.progress || '...'})`
       : `${c.count || 0} clips ready` + (c.candidates != null ? ` of ${c.candidates} matching` : '')
         + (c.updated ? ` (updated ${c.updated})` : '');
     if (c.error) t += ' - ' + c.error;
   }
-  if (p.mode === 'youtube') t = 'YouTube playlist on.';
   if (p.mode !== 'off' && p.last_event) t += ' Last: ' + p.last_event;
   $('pstate').textContent = t;
 }
@@ -854,7 +847,6 @@ async function loadPlayer() {
   const p = await (await fetch('/api/brb-player')).json();
   if (!playerLoaded) {          // fill the form once, never over the user's typing
     $('pmode').value = p.mode;
-    $('pyt').value = p.youtube_list ? 'https://www.youtube.com/playlist?list=' + p.youtube_list : '';
     $('pchannel').value = p.clips_channel;
     $('prange').value = p.clips_range;
     $('ppick').value = p.clips_pick;
@@ -874,14 +866,14 @@ async function loadPlayer() {
 $('pmode').onchange = renderPlayerRows;
 $('psave').onclick = () =>
   post('/api/brb-player', {
-    mode: $('pmode').value, youtube_list: $('pyt').value,
+    mode: $('pmode').value,
     clips_channel: $('pchannel').value, clips_range: $('prange').value,
     clips_pick: $('ppick').value, clips_max_len: +$('pmaxlen').value,
     clips_len_mode: $('plenmode').value, clips_exclude: $('pexclude').value,
     clips_creators: $('pcreators').value,
     overlay_info: $('pinfo').checked, overlay_timer: $('ptimer').checked,
     shuffle: $('pshuffle').checked, volume: +$('pvolume').value,
-  }).then(p => { toast('Playlist saved'); renderPlayerState(p); })
+  }).then(p => { toast('Clips saved'); renderPlayerState(p); })
     .catch(e => toast(e.message));
 $('pclipsnow').onclick = () =>
   post('/api/brb-player/refresh-clips').then(() => toast('Reloading clips...'))

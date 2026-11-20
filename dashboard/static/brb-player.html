@@ -4,8 +4,7 @@
   is on air (see dashboard/app.py: apply_brb_player). Not a page for people.
 
   Plays the channel's Twitch clips (downloaded and converted by the
-  dashboard, served from /brb/clips/) and/or a YouTube playlist. In "both"
-  mode: every clip once, then one YouTube video, then the clips again.
+  dashboard, served from /brb/clips/).
 
   Clip overlay: title, "clipped by", date and game slide in for a few seconds
   at the start of each clip; optional countdown in the corner.
@@ -23,7 +22,7 @@
 <style>
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
                font-family: system-ui, "Segoe UI", Roboto, sans-serif; }
-  #clip, #yt { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: none; background: #000; }
+  #clip { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: none; background: #000; }
   #clip { object-fit: contain; }
 
   /* Info card: bottom left, slides in at clip start, out after INFO_MS. */
@@ -54,7 +53,6 @@
 </head>
 <body>
 <video id="clip" playsinline></video>
-<div id="yt"></div>
 <div id="info"><div class="t"></div><div class="s"></div></div>
 <div id="timer">
   <svg viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="16"/><circle class="fg" cx="18" cy="18" r="16"/></svg>
@@ -68,8 +66,6 @@ const infoEl = document.getElementById('info');
 const timerEl = document.getElementById('timer');
 const ringEl = timerEl.querySelector('.fg');
 ringEl.style.strokeDasharray = RING;
-// The YouTube API replaces the #yt div with its iframe (same id), so look it up each time.
-const ytEl = () => document.getElementById('yt');
 
 let S = null;          // state from the dashboard
 let order = [];        // clip play order (indexes into S.clips)
@@ -82,7 +78,6 @@ let cur = null;        // clip on screen
 let gen = 0;
 let failures = 0;      // clips failed in a row
 let infoTimer = null;
-let ytPlayer = null, ytReady = false, ytFailures = 0;
 
 function report(msg) {
   try { fetch('/brb/player/log', { method: 'POST', body: msg }); } catch (e) {}
@@ -96,10 +91,8 @@ const store = {
 
 function hideAll() {
   clipEl.pause(); clipEl.style.display = 'none';
-  ytEl().style.display = 'none';
   infoEl.classList.remove('show'); timerEl.style.display = 'none';
   cur = null;
-  if (ytPlayer && ytReady) try { ytPlayer.pauseVideo(); } catch (e) {}
 }
 
 function shuffled(n) {
@@ -132,7 +125,8 @@ function clipLength() {
 // The dashboard replaces clips in the background (every 30 min, or when
 // settings change) and deletes the old files. Re-read the list after each
 // full round and after a run of failures, instead of playing a stale list.
-function reloadList(then) {
+function reloadList(then, wait = 0) {
+  if (wait) return setTimeout(() => reloadList(then), wait);
   return fetch('/brb/player/state').then(r => r.json()).then(state => {
     S.clips = state.clips; S.cut_at = state.cut_at;
     S.overlay_info = state.overlay_info; S.overlay_timer = state.overlay_timer;
@@ -152,11 +146,10 @@ function skipClip(g, why) {
 }
 
 function playClip() {
-  if (!S.clips.length) return next('clips-empty');
+  if (!S.clips.length) return reloadList(playClip, 20000);
   let pos = store.get('clipPos', 0);
   if (pos >= order.length) {        // whole queue played
     store.set('clipPos', 0);
-    if (S.mode === 'both') return playYoutube();
     return reloadList(playClip);
   }
   store.set('clipPos', pos + 1);
@@ -187,89 +180,13 @@ clipEl.ontimeupdate = () => {
 clipEl.onended = () => { if (cur) { gen++; playClip(); } };
 clipEl.onerror = () => { if (cur && clipEl.getAttribute('src')) skipClip(gen, 'load error'); };
 
-// ---- YouTube ----
-function loadYoutubeApi() {
-  const s = document.createElement('script');
-  s.onerror = () => report('youtube api could not be loaded');
-  s.src = 'https://www.youtube.com/iframe_api';
-  document.head.appendChild(s);
-}
-
-window.onYouTubeIframeAPIReady = () => {
-  ytPlayer = new YT.Player('yt', {
-    width: '100%', height: '100%',
-    playerVars: { listType: 'playlist', list: S.youtube_list, autoplay: 0, controls: 0,
-                  rel: 0, playsinline: 1, iv_load_policy: 3, origin: location.origin },
-    events: {
-      onReady: () => {
-        ytReady = true;
-        report('youtube ready, ' + ((ytPlayer.getPlaylist() || []).length) + ' videos');
-        ytPlayer.setVolume(S.volume);
-        ytPlayer.setLoop(true);
-        if (S.shuffle) ytPlayer.setShuffle(true);
-        if (S.mode === 'youtube' || !S.clips.length) playYoutube();
-      },
-      onStateChange: (e) => {
-        if (e.data === YT.PlayerState.PLAYING) {
-          ytFailures = 0;
-          try { report('youtube: ' + ytPlayer.getVideoData().title); } catch (err) {}
-          store.set('ytIndex', ytPlayer.getPlaylistIndex());
-        }
-        if (e.data === YT.PlayerState.ENDED) {
-          store.set('ytIndex', (ytPlayer.getPlaylistIndex() + 1));
-          // "both": one video, then back to the clips.
-          if (S.mode === 'both' && S.clips.length) playClip();
-        }
-      },
-      // 100/101/150: removed, private, or embedding disabled - just skip it.
-      onError: (e) => {
-        report('youtube error ' + e.data);
-        if (++ytFailures > 5) return next('yt-broken');
-        ytPlayer.nextVideo();
-      },
-    },
-  });
-};
-
-function playYoutube() {
-  if (!ytPlayer || !ytReady) {
-    // Not loaded (yet, or blocked): keep the clips going; onReady starts
-    // YouTube itself in youtube-only mode.
-    if (S.clips.length) playClip();
-    return;
-  }
-  hideAll();
-  ytEl().style.display = 'block';
-  const list = ytPlayer.getPlaylist() || [];
-  const i = store.get('ytIndex', 0);
-  if (list.length) ytPlayer.playVideoAt(i < list.length ? i : 0);
-  else ytPlayer.playVideo();
-}
-
-// Something can't play: fall back to whatever else is configured, else go
-// transparent and let the BRB media underneath show.
-function next(reason) {
-  if (reason === 'clips-empty' && S.youtube_list) { S.clips = []; return playYoutube(); }
-  if (reason === 'yt-broken') {
-    // Every video failing (150/152/153) is YouTube's bot check on a
-    // datacenter IP, not the playlist: OBS needs a signed-in YouTube session.
-    report('youtube blocked - sign in to YouTube inside OBS (docs/brb-player.md)');
-    if (S.clips.length) { S.mode = 'clips'; S.youtube_list = ''; return playClip(); }
-  }
-  hideAll();
-}
-
 fetch('/brb/player/state').then(r => r.json()).then(state => {
   S = state;
   if (S.mode === 'off') return;
   order = S.shuffle ? shuffled(S.clips.length) : [...Array(S.clips.length).keys()];
-  if (S.youtube_list) loadYoutubeApi();
-  if (S.clips.length) playClip();
-  else if (!S.youtube_list) {
-    // Clips still downloading: stay transparent and look again shortly.
-    hideAll();
-    setTimeout(() => location.reload(), 20000);
-  }
+  // No clips yet (still downloading): playClip stays transparent and
+  // re-reads the list every 20 s.
+  playClip();
 }).catch(() => { hideAll(); setTimeout(() => location.reload(), 20000); });
 </script>
 </body>
