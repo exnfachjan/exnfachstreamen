@@ -63,7 +63,10 @@ public_ipv4() {
 }
 
 # ---------------------------------------------------------------- .env ---
-env_get() { grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2-; }
+# Prints nothing (and still succeeds) for a missing key: callers use it in
+# assignments, where a failing grep would end the script silently under
+# set -e -o pipefail.
+env_get() { { grep -E "^$1=" .env 2>/dev/null || true; } | tail -1 | cut -d= -f2-; }
 
 # Set KEY=VALUE in .env, replacing an existing line or appending a new one.
 # VALUE goes through awk -v, not sed, so a token full of / + = cannot break it.
