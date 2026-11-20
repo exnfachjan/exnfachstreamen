@@ -26,6 +26,9 @@ This is a merge of two prior projects:
 
 ## Install
 
+Step by step from a fresh Hetzner server, including OS, SSH and Cloudflare:
+**[docs/install.md](docs/install.md)**. The short version:
+
 ```bash
 git clone https://github.com/exnfachjan/exnfachstreamen.git
 cd exnfachstreamen
