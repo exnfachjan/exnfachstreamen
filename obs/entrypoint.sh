@@ -76,5 +76,11 @@ sunshine >/var/log/sunshine.log 2>&1 &
 # Give Xvfb a moment before OBS attaches to it.
 sleep 2
 
+# Window manager (see obs/Dockerfile): title bars, close buttons, moving and
+# resizing dialogs. Started after the X server is up, before OBS maps its
+# first window.
+openbox --sm-disable >/var/log/openbox.log 2>&1 &
+sleep 0.5
+
 exec obs --collection IRL --profile IRL \
      --disable-shutdown-check --disable-missing-files-check

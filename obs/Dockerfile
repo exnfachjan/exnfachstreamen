@@ -209,6 +209,14 @@ RUN curl -fsSL -o /tmp/sunshine.deb \
     && apt-get update && apt-get install -y --no-install-recommends /tmp/sunshine.deb \
     && rm /tmp/sunshine.deb && rm -rf /var/lib/apt/lists/*
 
+# Window manager. KasmVNC is a bare X server: without a WM no window gets a
+# title bar, so OBS's Settings, Docks and every other dialog open with no
+# close button and can't be moved. Openbox is the smallest one that just
+# draws decorations. Its own layer, after the downloads above, so adding it
+# doesn't invalidate them.
+RUN apt-get update && apt-get install -y --no-install-recommends openbox \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /usr/local /usr/local
 RUN ldconfig
 
