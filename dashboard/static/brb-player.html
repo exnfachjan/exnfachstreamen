@@ -74,6 +74,13 @@ const ytEl = () => document.getElementById('yt');
 let S = null;          // state from the dashboard
 let order = [];        // clip play order (indexes into S.clips)
 let cur = null;        // clip on screen
+// Every start of a clip gets a new generation number. Event handlers from an
+// older clip (error, ended, a rejected play()) check it and do nothing - one
+// failure used to trigger BOTH onerror and play().catch, each starting the
+// next clip, doubling the playback chains on every failure until the page
+// flipped through clips every few milliseconds.
+let gen = 0;
+let failures = 0;      // clips failed in a row
 let infoTimer = null;
 let ytPlayer = null, ytReady = false, ytFailures = 0;
 
@@ -122,40 +129,63 @@ function clipLength() {
   return S.cut_at ? Math.min(d, S.cut_at) : d;
 }
 
+// The dashboard replaces clips in the background (every 30 min, or when
+// settings change) and deletes the old files. Re-read the list after each
+// full round and after a run of failures, instead of playing a stale list.
+function reloadList(then) {
+  return fetch('/brb/player/state').then(r => r.json()).then(state => {
+    S.clips = state.clips; S.cut_at = state.cut_at;
+    S.overlay_info = state.overlay_info; S.overlay_timer = state.overlay_timer;
+    S.volume = state.volume; S.shuffle = state.shuffle;
+    order = S.shuffle ? shuffled(S.clips.length) : [...Array(S.clips.length).keys()];
+    store.set('clipPos', 0);
+    then();
+  }).catch(() => setTimeout(then, 5000));
+}
+
+function skipClip(g, why) {
+  if (g !== gen) return;            // an older clip's handler - ignore
+  gen++;                            // nothing else for this clip may fire
+  report('clip failed: ' + why);
+  if (++failures >= 3) { failures = 0; return reloadList(playClip); }
+  setTimeout(playClip, 1000);
+}
+
 function playClip() {
   if (!S.clips.length) return next('clips-empty');
   let pos = store.get('clipPos', 0);
   if (pos >= order.length) {        // whole queue played
     store.set('clipPos', 0);
     if (S.mode === 'both') return playYoutube();
-    pos = 0;
-    if (S.shuffle) order = shuffled(S.clips.length);
+    return reloadList(playClip);
   }
   store.set('clipPos', pos + 1);
   const c = S.clips[order[pos]];
   hideAll();
   cur = c;
+  const g = ++gen;
   clipEl.src = c.src;
   clipEl.volume = S.volume / 100;
   clipEl.style.display = 'block';
   timerEl.style.display = S.overlay_timer ? 'block' : 'none';
   showInfo(c);
   report('clip: ' + c.title + (c.clipper ? ' (by ' + c.clipper + ')' : ''));
-  clipEl.play().catch(() => setTimeout(playClip, 1000));
+  clipEl.play().catch(e => skipClip(g, 'play: ' + e.name));
 }
 
+clipEl.onplaying = () => { failures = 0; };
 clipEl.ontimeupdate = () => {
   if (!cur) return;
   const len = clipLength();
-  if (S.cut_at && clipEl.currentTime >= S.cut_at) return playClip();
+  if (S.cut_at && clipEl.currentTime >= S.cut_at) { gen++; return playClip(); }
   if (S.overlay_timer && len) {
     const left = Math.max(0, len - clipEl.currentTime);
     timerEl.querySelector('span').textContent = Math.ceil(left);
     ringEl.style.strokeDashoffset = RING * (1 - left / len);
   }
 };
-clipEl.onended = () => playClip();
-clipEl.onerror = () => setTimeout(playClip, 1000);
+clipEl.onended = () => { if (cur) { gen++; playClip(); } };
+clipEl.onerror = () => { if (cur && clipEl.getAttribute('src')) skipClip(gen, 'load error'); };
 
 // ---- YouTube ----
 function loadYoutubeApi() {
